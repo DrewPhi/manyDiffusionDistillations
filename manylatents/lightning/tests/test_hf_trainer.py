@@ -25,6 +25,86 @@ def test_hf_trainer_config_defaults():
     assert config.warmup_steps == 0
 
 
+def test_hf_trainer_normalizes_string_torch_dtype():
+    assert HFTrainerModule._normalize_torch_dtype("bf16") == torch.bfloat16
+    assert HFTrainerModule._normalize_torch_dtype("bf16-mixed") == torch.bfloat16
+    assert HFTrainerModule._normalize_torch_dtype("float32") == torch.float32
+    assert HFTrainerModule._normalize_torch_dtype(None) is None
+
+
+def test_hf_trainer_configure_model_from_config_mode(monkeypatch):
+    """Should build model via AutoConfig+from_config when init_mode=from_config."""
+    calls = {}
+
+    class DummyNetwork:
+        def __init__(self):
+            self.dtype = None
+
+        def to(self, dtype=None):
+            self.dtype = dtype
+            return self
+
+    class DummyConfig:
+        hidden_size = 768
+
+    def fake_auto_config_from_pretrained(name, trust_remote_code=False, revision=None):
+        calls["config_source"] = name
+        calls["config_trust_remote_code"] = trust_remote_code
+        calls["config_revision"] = revision
+        return DummyConfig()
+
+    def fake_model_from_pretrained(*args, **kwargs):
+        calls["from_pretrained_called"] = True
+        return DummyNetwork()
+
+    def fake_model_from_config(cfg, **kwargs):
+        calls["from_config_called"] = True
+        calls["from_config_kwargs"] = kwargs
+        calls["config_hidden_size"] = getattr(cfg, "hidden_size", None)
+        calls["config_num_hidden_layers"] = getattr(cfg, "num_hidden_layers", None)
+        return DummyNetwork()
+
+    def fake_tokenizer_from_pretrained(name, trust_remote_code=False):
+        calls["tokenizer_source"] = name
+        calls["tokenizer_trust_remote_code"] = trust_remote_code
+        return object()
+
+    monkeypatch.setattr(
+        "manylatents.lightning.hf_trainer.AutoConfig.from_pretrained",
+        fake_auto_config_from_pretrained,
+    )
+    monkeypatch.setattr(
+        "manylatents.lightning.hf_trainer.AutoModelForCausalLM.from_pretrained",
+        fake_model_from_pretrained,
+    )
+    monkeypatch.setattr(
+        "manylatents.lightning.hf_trainer.AutoModelForCausalLM.from_config",
+        fake_model_from_config,
+    )
+    monkeypatch.setattr(
+        "manylatents.lightning.hf_trainer.AutoTokenizer.from_pretrained",
+        fake_tokenizer_from_pretrained,
+    )
+
+    config = HFTrainerConfig(
+        model_name_or_path="EleutherAI/pythia-70m",
+        init_mode="from_config",
+        model_config_name_or_path="EleutherAI/pythia-70m",
+        model_config_overrides={"num_hidden_layers": 2},
+        tokenizer_name="EleutherAI/pythia-70m",
+        trust_remote_code=False,
+        torch_dtype=torch.float32,
+    )
+    module = HFTrainerModule(config)
+    module.configure_model()
+
+    assert calls.get("from_config_called", False) is True
+    assert calls.get("from_pretrained_called", False) is False
+    assert calls["config_source"] == "EleutherAI/pythia-70m"
+    assert calls["config_num_hidden_layers"] == 2
+    assert calls["tokenizer_source"] == "EleutherAI/pythia-70m"
+
+
 @pytest.mark.slow
 def test_hf_trainer_module_forward_pass():
     """Integration test with actual tiny model."""

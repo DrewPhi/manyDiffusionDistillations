@@ -1,0 +1,336 @@
+# Stage pipeline for family-agnostic PHATE-target distillation studies.
+#
+# Config-native end-to-end study unit:
+# probe_teacher -> phate_teacher_target -> distill_sweep_grid -> sweep_results_sheet
+#
+# This template is intended to be reused across model families. Family-specific
+# differences live in the `family/` config group; layer matching differences live
+# in the `layer_scheme/` config group.
+
+run_id: ${name}
+output_root: ${output_dir}/pipelines
+resume: true
+
+params:
+  teacher:
+    model_name_or_path: ${family.teacher.model_name_or_path}
+    model_revision: ${family.teacher.model_revision}
+    trust_remote_code: ${family.teacher.trust_remote_code}
+    penultimate_layer_spec: ${family.layer_paths.penultimate}
+    layer_paths: ${layer_scheme.teacher_layer_specs}
+    probe_layer_specs: ${layer_scheme.teacher_probe_layer_specs}
+
+  student:
+    model_name_or_path: ${family.student.model_name_or_path}
+    model_revision: ${family.student.model_revision}
+    trust_remote_code: ${family.student.trust_remote_code}
+    init_from_scratch: ${family.student.init_from_scratch}
+    penultimate_dim: ${family.student.penultimate_dim}
+    penultimate_layer_spec: ${family.layer_paths.penultimate}
+    layer_paths: ${layer_scheme.student_layer_specs}
+
+  reusable_artifacts:
+    probe_teacher_manifest_path: null
+    phate_teacher_target_manifest_path: null
+
+  data:
+    dataset_name: json
+    dataset_config: null
+    dataset_path: /network/datasets/pile.var/pile_uncopyrighted/pile-uncopyrighted
+    dataset_revision: null
+    text_field: text
+    tokenizer_name: ${family.tokenizer_name}
+    max_length: 1024
+    token_budget: 5000000000
+    train_example_offset: 0
+    train_split: train
+    val_split: val
+    test_split: test
+    probe_split: train
+    exclude_probe_from_train: true
+    shuffle_buffer_size: 10000
+
+  probe:
+    sampling: random
+    seed: 42
+    ids_path: null
+    size: 1024
+    train_fraction: 0.8
+    eval_fraction: 0.2
+    save_ids: false
+
+  diffusion:
+    knn: 35
+    alpha: 1.0
+    symmetric: false
+    metric: euclidean
+
+  phate:
+    n_components: ${family.student.penultimate_dim}
+    knn: 35
+    t: auto
+    decay: 40
+    gamma: 1.0
+    random_state: 42
+    n_pca: null
+    n_landmark: null
+    n_jobs: -1
+    verbose: false
+    fit_fraction: 1.0
+    procrustes_align: true
+
+  training:
+    precision: bf16
+    global_batch_size: 512
+    micro_batch_size: 8
+    grad_accum_steps: 64
+    max_steps: null
+    eval_every_n_steps: 1000
+    save_every_n_steps: 1000
+    save_top_k: 3
+    gradient_clip_norm: 1.0
+    train_history_every_n_steps: 10
+    lm_loss_weight: 1.0
+    student_init_checkpoint_path: null
+
+  optimizer:
+    name: adamw
+    learning_rate: 3.0e-4
+    betas: [0.9, 0.95]
+    eps: 1.0e-8
+    weight_decay: 0.1
+
+  lr_scheduler:
+    type: cosine
+    warmup_steps: 2000
+    min_lr: 3.0e-5
+
+  regularization:
+    dropout: 0.0
+    label_smoothing: 0.0
+
+  alignment:
+    loss: mse
+    mse_reduction: mean
+    lambda_align: 0.0
+    lambda_schedule: constant
+    lambda_ramp_steps: 0
+    batch_size: 16
+    eval_batch_size: 8
+    sample_every_n_steps: 1
+    layer_loss_weights: null
+
+  seeds:
+    global_seed: 42
+    model_init_seed: null
+    data_order_seed: null
+    dataloader_seed: null
+    phate_seed: 42
+
+  reporting:
+    spreadsheet_name: distill_family_study_results
+    include_columns:
+      - teacher_model
+      - student_model
+      - seed
+      - lambda_align
+      - lm_loss_weight
+      - val_loss
+      - val_perplexity
+      - test_loss
+      - test_perplexity
+      - align_mse
+      - run_dir
+      - ckpt_path
+      - train_history_csv_path
+
+  sweep:
+    teacher_model:
+      - ${family.teacher.model_name_or_path}
+    student_model:
+      - ${family.student.model_name_or_path}
+    seed:
+      - 42
+    lambda_align:
+      - 0.0
+      - 0.5
+      - 1.0
+    learning_rate:
+      - 3.0e-4
+    max_length:
+      - 1024
+    token_budget:
+      - 5000000000
+    train_example_offset:
+      - 0
+    lm_loss_weight:
+      - 1.0
+
+stages:
+  - name: probe_teacher
+    target: manylatents.pipeline.stages.probe_extraction.ProbeExtractionStage
+    depends_on: []
+    params:
+      external_manifest_path: ${stage_pipeline.params.reusable_artifacts.probe_teacher_manifest_path}
+      output_subdir: probe_teacher
+      probe_callback_path: callbacks.trainer.probe
+      diffusion:
+        knn: ${stage_pipeline.params.diffusion.knn}
+        alpha: ${stage_pipeline.params.diffusion.alpha}
+        symmetric: ${stage_pipeline.params.diffusion.symmetric}
+        metric: ${stage_pipeline.params.diffusion.metric}
+      config_overrides:
+        seed: ${stage_pipeline.params.seeds.global_seed}
+        algorithms:
+          lightning:
+            config:
+              model_name_or_path: ${stage_pipeline.params.teacher.model_name_or_path}
+              model_revision: ${stage_pipeline.params.teacher.model_revision}
+              trust_remote_code: ${stage_pipeline.params.teacher.trust_remote_code}
+        data:
+          dataset_name: ${stage_pipeline.params.data.dataset_name}
+          dataset_config: ${stage_pipeline.params.data.dataset_config}
+          dataset_path: ${stage_pipeline.params.data.dataset_path}
+          tokenizer_name: ${stage_pipeline.params.data.tokenizer_name}
+          max_length: ${stage_pipeline.params.data.max_length}
+          probe_n_samples: ${stage_pipeline.params.probe.size}
+          probe_ids_path: ${stage_pipeline.params.probe.ids_path}
+          persist_probe_ids: ${stage_pipeline.params.probe.save_ids}
+        callbacks:
+          trainer:
+            probe:
+              save_raw: true
+              layer_specs: ${stage_pipeline.params.teacher.probe_layer_specs}
+
+  - name: phate_teacher_target
+    target: manylatents.pipeline.stages.phate_aligned_target.PHATEAlignedTargetStage
+    depends_on: [probe_teacher]
+    params:
+      external_manifest_path: ${stage_pipeline.params.reusable_artifacts.phate_teacher_target_manifest_path}
+      source_stage: probe_teacher
+      diffusion_key: diffusion_operators
+      raw_activations_key: raw_activations_dir
+      raw_activation_glob: '*.npy'
+      source_file_index: -1
+      output_subdir: phate_teacher_target
+      output_suffix: __teacher_aligned_target.npy
+      n_components: ${stage_pipeline.params.phate.n_components}
+      random_state: ${stage_pipeline.params.seeds.phate_seed}
+      knn: ${stage_pipeline.params.phate.knn}
+      t: ${stage_pipeline.params.phate.t}
+      decay: ${stage_pipeline.params.phate.decay}
+      gamma: ${stage_pipeline.params.phate.gamma}
+      n_pca: ${stage_pipeline.params.phate.n_pca}
+      n_landmark: ${stage_pipeline.params.phate.n_landmark}
+      n_jobs: ${stage_pipeline.params.phate.n_jobs}
+      verbose: ${stage_pipeline.params.phate.verbose}
+      fit_fraction: ${stage_pipeline.params.phate.fit_fraction}
+
+  - name: distill_sweep_grid
+    target: manylatents.pipeline.stages.distillation_sweep.DistillationSweepStage
+    depends_on: [probe_teacher, phate_teacher_target]
+    params:
+      teacher_stage: probe_teacher
+      teacher_target_stage: phate_teacher_target
+      output_subdir: distill_sweep_grid
+
+      teacher_model_name_or_path: ${stage_pipeline.params.teacher.model_name_or_path}
+      teacher_model_revision: ${stage_pipeline.params.teacher.model_revision}
+      student_model_name_or_path: ${stage_pipeline.params.student.model_name_or_path}
+      student_model_revision: ${stage_pipeline.params.student.model_revision}
+      init_from_scratch: ${stage_pipeline.params.student.init_from_scratch}
+      family_name: ${family.name}
+      family_architecture: ${family.architecture}
+      alignment_side: ${family.alignment_side}
+      penultimate_layer_teacher: ${stage_pipeline.params.teacher.penultimate_layer_spec}
+      penultimate_layer_student: ${stage_pipeline.params.student.penultimate_layer_spec}
+      teacher_layer_specs: ${stage_pipeline.params.teacher.layer_paths}
+      student_layer_specs: ${stage_pipeline.params.student.layer_paths}
+      penultimate_dim_student: ${stage_pipeline.params.student.penultimate_dim}
+
+      dataset_name: ${stage_pipeline.params.data.dataset_name}
+      dataset_config: ${stage_pipeline.params.data.dataset_config}
+      dataset_path: ${stage_pipeline.params.data.dataset_path}
+      dataset_revision: ${stage_pipeline.params.data.dataset_revision}
+      text_field: ${stage_pipeline.params.data.text_field}
+      probe_ids_path: ${stage_pipeline.params.probe.ids_path}
+      tokenizer_name: ${stage_pipeline.params.data.tokenizer_name}
+      max_length: ${stage_pipeline.params.data.max_length}
+      token_budget: ${stage_pipeline.params.data.token_budget}
+      train_example_offset: ${stage_pipeline.params.data.train_example_offset}
+      train_split: ${stage_pipeline.params.data.train_split}
+      val_split: ${stage_pipeline.params.data.val_split}
+      test_split: ${stage_pipeline.params.data.test_split}
+      probe_split: ${stage_pipeline.params.data.probe_split}
+      exclude_probe_from_train: ${stage_pipeline.params.data.exclude_probe_from_train}
+
+      precision: ${stage_pipeline.params.training.precision}
+      global_batch_size: ${stage_pipeline.params.training.global_batch_size}
+      micro_batch_size: ${stage_pipeline.params.training.micro_batch_size}
+      grad_accum_steps: ${stage_pipeline.params.training.grad_accum_steps}
+      max_steps: ${stage_pipeline.params.training.max_steps}
+      eval_every_n_steps: ${stage_pipeline.params.training.eval_every_n_steps}
+      save_every_n_steps: ${stage_pipeline.params.training.save_every_n_steps}
+      save_top_k: ${stage_pipeline.params.training.save_top_k}
+      gradient_clip_norm: ${stage_pipeline.params.training.gradient_clip_norm}
+      train_history_every_n_steps: ${stage_pipeline.params.training.train_history_every_n_steps}
+      lm_loss_weight: ${stage_pipeline.params.training.lm_loss_weight}
+      student_init_checkpoint_path: ${stage_pipeline.params.training.student_init_checkpoint_path}
+
+      optimizer:
+        name: ${stage_pipeline.params.optimizer.name}
+        learning_rate: ${stage_pipeline.params.optimizer.learning_rate}
+        betas: ${stage_pipeline.params.optimizer.betas}
+        eps: ${stage_pipeline.params.optimizer.eps}
+        weight_decay: ${stage_pipeline.params.optimizer.weight_decay}
+
+      lr_scheduler:
+        type: ${stage_pipeline.params.lr_scheduler.type}
+        warmup_steps: ${stage_pipeline.params.lr_scheduler.warmup_steps}
+        min_lr: ${stage_pipeline.params.lr_scheduler.min_lr}
+
+      regularization:
+        dropout: ${stage_pipeline.params.regularization.dropout}
+        label_smoothing: ${stage_pipeline.params.regularization.label_smoothing}
+
+      alignment:
+        loss: ${stage_pipeline.params.alignment.loss}
+        mse_reduction: ${stage_pipeline.params.alignment.mse_reduction}
+        lambda_align: ${stage_pipeline.params.alignment.lambda_align}
+        lambda_schedule: ${stage_pipeline.params.alignment.lambda_schedule}
+        lambda_ramp_steps: ${stage_pipeline.params.alignment.lambda_ramp_steps}
+        batch_size: ${stage_pipeline.params.alignment.batch_size}
+        sample_every_n_steps: ${stage_pipeline.params.alignment.sample_every_n_steps}
+        probe_train_fraction: ${stage_pipeline.params.probe.train_fraction}
+        probe_eval_fraction: ${stage_pipeline.params.probe.eval_fraction}
+      layer_loss_weights: ${layer_scheme.layer_loss_weights}
+
+      seeds:
+        global_seed: ${stage_pipeline.params.seeds.global_seed}
+        model_init_seed: ${stage_pipeline.params.seeds.model_init_seed}
+        data_order_seed: ${stage_pipeline.params.seeds.data_order_seed}
+        dataloader_seed: ${stage_pipeline.params.seeds.dataloader_seed}
+        phate_seed: ${stage_pipeline.params.seeds.phate_seed}
+
+      sweep_tied_keys:
+        - [lambda_align, lm_loss_weight]
+      sweep:
+        teacher_model: ${stage_pipeline.params.sweep.teacher_model}
+        student_model: ${stage_pipeline.params.sweep.student_model}
+        seed: ${stage_pipeline.params.sweep.seed}
+        lambda_align: ${stage_pipeline.params.sweep.lambda_align}
+        lm_loss_weight: ${stage_pipeline.params.sweep.lm_loss_weight}
+        learning_rate: ${stage_pipeline.params.sweep.learning_rate}
+        max_length: ${stage_pipeline.params.sweep.max_length}
+        token_budget: ${stage_pipeline.params.sweep.token_budget}
+        train_example_offset: ${stage_pipeline.params.sweep.train_example_offset}
+
+  - name: sweep_results_sheet
+    target: manylatents.pipeline.stages.sweep_spreadsheet.SweepSpreadsheetStage
+    depends_on: [distill_sweep_grid]
+    params:
+      source_stage: distill_sweep_grid
+      source_key: sweep_results_json
+      output_subdir: sweep_results_sheet
+      output_prefix: ${stage_pipeline.params.reporting.spreadsheet_name}
+      include_columns: ${stage_pipeline.params.reporting.include_columns}

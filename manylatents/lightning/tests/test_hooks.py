@@ -20,6 +20,18 @@ class MockModel(nn.Module):
         self.lm_head = nn.Linear(64, 100)
 
 
+class MockGPTNeoXBackbone(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.layers = nn.ModuleList([MockTransformerBlock() for _ in range(4)])
+
+
+class MockGPTNeoXModel(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.gpt_neox = MockGPTNeoXBackbone()
+
+
 def test_layer_spec_defaults():
     spec = LayerSpec(path="model.layers[-1]")
     assert spec.path == "model.layers[-1]"
@@ -65,8 +77,14 @@ def test_resolve_layer_negative_index():
 
 def test_resolve_layer_invalid():
     model = MockModel()
-    with pytest.raises(AttributeError, match="has no attribute 'nonexistent'"):
+    with pytest.raises(AttributeError, match="Could not resolve layer path"):
         resolve_layer(model, "nonexistent")
+
+
+def test_resolve_layer_alias_transformer_h_to_gpt_neox_layers():
+    model = MockGPTNeoXModel()
+    layer = resolve_layer(model, "transformer.h[-1]")
+    assert layer is model.gpt_neox.layers[-1]
 
 
 # ActivationExtractor tests
@@ -188,3 +206,20 @@ def test_activation_extractor_reduce_all():
 
     activations = extractor.get_activations()
     assert activations["layer"].shape == (4, 8, 20)  # Kept full sequence
+
+
+def test_activation_extractor_detach_false_preserves_grad():
+    model = SimpleModel()
+    spec = LayerSpec(path="layer1", reduce="none")
+    extractor = ActivationExtractor([spec], detach=False)
+
+    x = torch.randn(4, 10, requires_grad=True)
+    with extractor.capture(model):
+        out = model(x)
+
+    acts = extractor.get_activations()["layer1"]
+    assert acts.requires_grad is True
+
+    loss = acts.pow(2).mean() + out.pow(2).mean()
+    loss.backward()
+    assert model.layer1.weight.grad is not None

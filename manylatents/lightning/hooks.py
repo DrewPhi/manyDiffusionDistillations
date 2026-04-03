@@ -42,25 +42,8 @@ class LayerSpec:
             )
 
 
-def resolve_layer(model: nn.Module, path: str) -> nn.Module:
-    """Resolve a dot-separated path to a layer in a model.
-
-    Supports:
-    - Dot notation: "layers.0.self_attn"
-    - Index notation: "layers[0].self_attn"
-    - Negative indices: "layers[-1]"
-
-    Args:
-        model: The model to traverse
-        path: Dot-separated path with optional bracket indices
-
-    Returns:
-        The resolved layer
-
-    Raises:
-        AttributeError: If path component doesn't exist
-        IndexError: If index is out of bounds
-    """
+def _resolve_layer_once(model: nn.Module, path: str) -> nn.Module:
+    """Resolve a single path without alias expansion."""
     current: Any = model
 
     # Split on dots, but preserve bracket notation
@@ -84,6 +67,71 @@ def resolve_layer(model: nn.Module, path: str) -> nn.Module:
     return current
 
 
+def _candidate_paths(path: str) -> List[str]:
+    """Generate likely alias paths for common HF architecture differences."""
+    candidates = [path]
+
+    # GPTNeoX/Llama-style models often expose blocks as gpt_neox.layers/model.layers
+    # while legacy GPT2-style paths use transformer.h.
+    if path.startswith("transformer.h"):
+        suffix = path[len("transformer.h"):]
+        candidates.extend([
+            f"gpt_neox.layers{suffix}",
+            f"model.layers{suffix}",
+            f"transformer.layers{suffix}",
+        ])
+    elif path.startswith("transformer."):
+        suffix = path[len("transformer."):]
+        candidates.extend([
+            f"model.{suffix}",
+            f"gpt_neox.{suffix}",
+        ])
+
+    # Keep order but drop duplicates.
+    deduped: List[str] = []
+    for c in candidates:
+        if c not in deduped:
+            deduped.append(c)
+    return deduped
+
+
+def resolve_layer(model: nn.Module, path: str) -> nn.Module:
+    """Resolve a dot-separated path to a layer in a model.
+
+    Supports:
+    - Dot notation: "layers.0.self_attn"
+    - Index notation: "layers[0].self_attn"
+    - Negative indices: "layers[-1]"
+
+    Args:
+        model: The model to traverse
+        path: Dot-separated path with optional bracket indices
+
+    Returns:
+        The resolved layer
+
+    Raises:
+        AttributeError: If path component doesn't exist
+        IndexError: If index is out of bounds
+    """
+    last_error: Exception | None = None
+    for candidate in _candidate_paths(path):
+        try:
+            return _resolve_layer_once(model, candidate)
+        except (AttributeError, IndexError, TypeError) as exc:
+            last_error = exc
+            continue
+
+    if last_error is None:
+        raise AttributeError(f"Could not resolve layer path '{path}'")
+
+    attempted = ", ".join(_candidate_paths(path))
+    raise AttributeError(
+        f"Could not resolve layer path '{path}'. Tried: {attempted}. "
+        f"Last error: {last_error}"
+    ) from last_error
+
+
 class ActivationExtractor:
     """Extract activations from specified layers using forward hooks.
 
@@ -94,8 +142,9 @@ class ActivationExtractor:
         activations = extractor.get_activations()
     """
 
-    def __init__(self, layer_specs: List[LayerSpec]):
+    def __init__(self, layer_specs: List[LayerSpec], detach: bool = True):
         self.layer_specs = layer_specs
+        self.detach = detach
         self._activations: Dict[str, List[Tensor]] = {}
         self._handles: List = []
 
@@ -113,7 +162,7 @@ class ActivationExtractor:
 
             if spec.path not in self._activations:
                 self._activations[spec.path] = []
-            self._activations[spec.path].append(tensor.detach())
+            self._activations[spec.path].append(tensor.detach() if self.detach else tensor)
 
         return hook
 

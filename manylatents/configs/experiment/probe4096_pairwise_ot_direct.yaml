@@ -1,0 +1,53 @@
+# @package _global_
+# Pairwise Pythia 4096 experiment with OT barycenter merging.
+# Mirrors the old pairwise/direct 4096 orchestration structure while staying config-native.
+#
+# Usage:
+#   uv run python -m manylatents.main experiment=probe4096_pairwise_ot_direct
+
+name: probe4096_pairwise_ot_direct
+project: manylatents_pipeline
+seed: 42
+debug: false
+
+defaults:
+  - override /data: wikitext
+  - override /algorithms/lightning: hf_trainer
+  - override /trainer: default
+  - override /callbacks/trainer: probe
+  - override /stage_pipeline: probe4096_pairwise_ot
+  - _self_
+
+data:
+  tokenizer_name: ${algorithms.lightning.config.model_name_or_path}
+  dataset_name: wikitext
+  dataset_config: wikitext-103-raw-v1
+  max_length: 128
+  batch_size: 8
+  probe_n_samples: 4096
+
+algorithms:
+  lightning:
+    config:
+      model_name_or_path: /network/weights/pythia/pythia-410m/step143000
+      learning_rate: 2e-5
+      weight_decay: 0.0
+      warmup_steps: 0
+      torch_dtype: float32
+
+trainer:
+  max_epochs: 1
+  max_steps: 1
+  precision: 32
+  gradient_clip_val: 1.0
+  accumulate_grad_batches: 1
+  val_check_interval: 1.0
+
+callbacks:
+  trainer:
+    probe:
+      log_to_wandb: false
+      save_raw: true
+
+stage_pipeline:
+  resume: true

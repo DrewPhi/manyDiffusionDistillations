@@ -8,6 +8,7 @@ defaults:
   - algorithms/latent: null
   - algorithms/lightning: null
   - pipeline: null
+  - stage_pipeline: null
   - metrics: null
   - metrics/embedding: null
   - metrics/module: null
@@ -18,3 +19,4 @@ defaults:
   - optional resources: null  # NEW: enables resources=gpu
 
 pipeline: []
+stage_pipeline: null

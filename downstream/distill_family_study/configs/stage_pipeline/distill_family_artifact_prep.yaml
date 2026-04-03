@@ -1,0 +1,147 @@
+# Reusable teacher-side artifact builder.
+#
+# This is the expensive half of the study:
+# - probe_teacher should usually be run once per family/teacher/probe contract
+# - phate_teacher_target should be run once per student target dimension
+
+run_id: ${name}
+output_root: ${output_dir}/pipelines
+resume: true
+
+params:
+  teacher:
+    model_name_or_path: ${family.teacher.model_name_or_path}
+    model_revision: ${family.teacher.model_revision}
+    trust_remote_code: ${family.teacher.trust_remote_code}
+    penultimate_layer_spec: ${family.layer_paths.penultimate}
+    layer_paths: ${layer_scheme.teacher_layer_specs}
+    probe_layer_specs: ${layer_scheme.teacher_probe_layer_specs}
+
+  data:
+    dataset_name: json
+    dataset_config: null
+    dataset_path: /network/datasets/pile.var/pile_uncopyrighted/pile-uncopyrighted
+    dataset_revision: null
+    text_field: text
+    tokenizer_name: ${family.tokenizer_name}
+    max_length: 1024
+    token_budget: 5000000000
+    train_example_offset: 0
+    train_split: train
+    val_split: val
+    test_split: test
+    probe_split: train
+    exclude_probe_from_train: true
+
+  probe:
+    sampling: random
+    seed: 42
+    ids_path: null
+    size: 1024
+    train_fraction: 0.8
+    eval_fraction: 0.2
+    save_ids: true
+
+  diffusion:
+    knn: 35
+    alpha: 1.0
+    symmetric: false
+    metric: euclidean
+
+  phate:
+    n_components: ${family.student.penultimate_dim}
+    knn: 35
+    t: auto
+    decay: 40
+    gamma: 1.0
+    random_state: 42
+    n_pca: null
+    n_landmark: null
+    n_jobs: -1
+    verbose: false
+    fit_fraction: 1.0
+    procrustes_align: true
+
+  training:
+    precision: bf16
+    global_batch_size: 512
+    micro_batch_size: 8
+    grad_accum_steps: 64
+    gradient_clip_norm: 1.0
+
+  optimizer:
+    name: adamw
+    learning_rate: 3.0e-4
+    betas: [0.9, 0.95]
+    eps: 1.0e-8
+    weight_decay: 0.1
+
+  lr_scheduler:
+    type: cosine
+    warmup_steps: 2000
+    min_lr: 3.0e-5
+
+  seeds:
+    global_seed: 42
+    model_init_seed: null
+    data_order_seed: 42
+    dataloader_seed: null
+    phate_seed: 42
+
+stages:
+  - name: probe_teacher
+    target: manylatents.pipeline.stages.probe_extraction.ProbeExtractionStage
+    depends_on: []
+    params:
+      output_subdir: probe_teacher
+      probe_callback_path: callbacks.trainer.probe
+      diffusion:
+        knn: ${stage_pipeline.params.diffusion.knn}
+        alpha: ${stage_pipeline.params.diffusion.alpha}
+        symmetric: ${stage_pipeline.params.diffusion.symmetric}
+        metric: ${stage_pipeline.params.diffusion.metric}
+      config_overrides:
+        seed: ${stage_pipeline.params.seeds.global_seed}
+        algorithms:
+          lightning:
+            config:
+              model_name_or_path: ${stage_pipeline.params.teacher.model_name_or_path}
+              model_revision: ${stage_pipeline.params.teacher.model_revision}
+              trust_remote_code: ${stage_pipeline.params.teacher.trust_remote_code}
+        data:
+          dataset_name: ${stage_pipeline.params.data.dataset_name}
+          dataset_config: ${stage_pipeline.params.data.dataset_config}
+          dataset_path: ${stage_pipeline.params.data.dataset_path}
+          tokenizer_name: ${stage_pipeline.params.data.tokenizer_name}
+          max_length: ${stage_pipeline.params.data.max_length}
+          probe_n_samples: ${stage_pipeline.params.probe.size}
+          probe_ids_path: ${stage_pipeline.params.probe.ids_path}
+          persist_probe_ids: ${stage_pipeline.params.probe.save_ids}
+        callbacks:
+          trainer:
+            probe:
+              save_raw: true
+              layer_specs: ${stage_pipeline.params.teacher.probe_layer_specs}
+
+  - name: phate_teacher_target
+    target: manylatents.pipeline.stages.phate_aligned_target.PHATEAlignedTargetStage
+    depends_on: [probe_teacher]
+    params:
+      source_stage: probe_teacher
+      diffusion_key: diffusion_operators
+      raw_activations_key: raw_activations_dir
+      raw_activation_glob: '*.npy'
+      source_file_index: -1
+      output_subdir: phate_teacher_target
+      output_suffix: __teacher_aligned_target.npy
+      n_components: ${stage_pipeline.params.phate.n_components}
+      random_state: ${stage_pipeline.params.seeds.phate_seed}
+      knn: ${stage_pipeline.params.phate.knn}
+      t: ${stage_pipeline.params.phate.t}
+      decay: ${stage_pipeline.params.phate.decay}
+      gamma: ${stage_pipeline.params.phate.gamma}
+      n_pca: ${stage_pipeline.params.phate.n_pca}
+      n_landmark: ${stage_pipeline.params.phate.n_landmark}
+      n_jobs: ${stage_pipeline.params.phate.n_jobs}
+      verbose: ${stage_pipeline.params.phate.verbose}
+      fit_fraction: ${stage_pipeline.params.phate.fit_fraction}

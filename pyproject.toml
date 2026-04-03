@@ -103,7 +103,6 @@ managed = true
 [dependency-groups]
 dev = [
     "pytest>=8.3",
-    "shop",
 ]
 
 [tool.uv.sources]

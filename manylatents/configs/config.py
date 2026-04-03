@@ -20,8 +20,17 @@ class Config:
     pipeline: List[Any] = field(default_factory=list)
     """An ordered list of algorithms to run sequentially."""
 
+    stage_pipeline: Optional[Any] = None
+    """DAG-style staged pipeline configuration."""
+
     data: Optional[Any] = None
     """Configuration for the data (dataset + transforms + dataloader creation)."""
+
+    family: Optional[Any] = None
+    """Optional family-specific study configuration for distillation experiments."""
+
+    layer_scheme: Optional[Any] = None
+    """Optional layer-matching scheme configuration for distillation experiments."""
 
     callbacks: Optional[Any] = None
     """Configuration for callbacks used during training and evaluation."""

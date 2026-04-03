@@ -1,0 +1,29 @@
+# @package family
+
+name: pythia
+architecture: decoder_only
+alignment_side: decoder
+model_family: causal_lm
+teacher:
+  model_name_or_path: EleutherAI/pythia-1.4b
+  model_revision: main
+  trust_remote_code: false
+student:
+  model_name_or_path: EleutherAI/pythia-70m
+  model_revision: main
+  trust_remote_code: false
+  init_from_scratch: true
+  penultimate_dim: 512
+tokenizer_name: EleutherAI/pythia-70m
+candidate_teachers:
+  - EleutherAI/pythia-1.4b
+  - EleutherAI/pythia-2.8b
+  - EleutherAI/pythia-6.9b
+candidate_students:
+  - EleutherAI/pythia-70m
+  - EleutherAI/pythia-410m
+  - EleutherAI/pythia-1b
+  - EleutherAI/pythia-2.8b
+layer_paths:
+  second: transformer.h[1]
+  penultimate: transformer.h[-2]

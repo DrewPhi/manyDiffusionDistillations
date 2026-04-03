@@ -1,0 +1,247 @@
+run_id: ${name}
+output_root: ${output_dir}/pipelines
+resume: true
+stages:
+  - name: probe_pythia_70m
+    target: manylatents.pipeline.stages.probe_extraction.ProbeExtractionStage
+    depends_on: []
+    params:
+      output_subdir: probe_pythia_70m
+      probe_callback_path: callbacks.trainer.probe
+      config_overrides:
+        algorithms:
+          lightning:
+            config:
+              model_name_or_path: /network/weights/pythia/pythia-70m/step143000
+
+  - name: probe_pythia_160m
+    target: manylatents.pipeline.stages.probe_extraction.ProbeExtractionStage
+    depends_on: []
+    params:
+      output_subdir: probe_pythia_160m
+      probe_callback_path: callbacks.trainer.probe
+      config_overrides:
+        algorithms:
+          lightning:
+            config:
+              model_name_or_path: /network/weights/pythia/pythia-160m/step143000
+
+  - name: probe_pythia_410m
+    target: manylatents.pipeline.stages.probe_extraction.ProbeExtractionStage
+    depends_on: []
+    params:
+      output_subdir: probe_pythia_410m
+      probe_callback_path: callbacks.trainer.probe
+      config_overrides:
+        algorithms:
+          lightning:
+            config:
+              model_name_or_path: /network/weights/pythia/pythia-410m/step143000
+
+  - name: probe_pythia_1b
+    target: manylatents.pipeline.stages.probe_extraction.ProbeExtractionStage
+    depends_on: []
+    params:
+      output_subdir: probe_pythia_1b
+      probe_callback_path: callbacks.trainer.probe
+      config_overrides:
+        algorithms:
+          lightning:
+            config:
+              model_name_or_path: /network/weights/pythia/pythia-1b/step143000
+
+  - name: probe_pythia_1p4b
+    target: manylatents.pipeline.stages.probe_extraction.ProbeExtractionStage
+    depends_on: []
+    params:
+      output_subdir: probe_pythia_1p4b
+      probe_callback_path: callbacks.trainer.probe
+      config_overrides:
+        algorithms:
+          lightning:
+            config:
+              model_name_or_path: /network/weights/pythia/pythia-1.4b/step143000
+
+  - name: probe_pythia_2p8b
+    target: manylatents.pipeline.stages.probe_extraction.ProbeExtractionStage
+    depends_on: []
+    params:
+      output_subdir: probe_pythia_2p8b
+      probe_callback_path: callbacks.trainer.probe
+      config_overrides:
+        algorithms:
+          lightning:
+            config:
+              model_name_or_path: /network/weights/pythia/pythia-2.8b/step143000
+
+  - name: probe_pythia_6p9b
+    target: manylatents.pipeline.stages.probe_extraction.ProbeExtractionStage
+    depends_on: []
+    params:
+      output_subdir: probe_pythia_6p9b
+      probe_callback_path: callbacks.trainer.probe
+      config_overrides:
+        algorithms:
+          lightning:
+            config:
+              model_name_or_path: /network/weights/pythia/pythia-6.9b-deduped/step143000
+
+  - name: diffusion_merge_pairwise_ot
+    target: manylatents.pipeline.stages.diffusion_merge.DiffusionMergeStage
+    depends_on: [probe_pythia_70m, probe_pythia_160m, probe_pythia_410m, probe_pythia_1b, probe_pythia_1p4b, probe_pythia_2p8b, probe_pythia_6p9b]
+    params:
+      source_stages: [probe_pythia_70m, probe_pythia_160m, probe_pythia_410m, probe_pythia_1b, probe_pythia_1p4b, probe_pythia_2p8b, probe_pythia_6p9b]
+      source_key: diffusion_operators
+      operator_index: -1
+      strategy: ot_barycenter
+      normalize_output: true
+      merge_mode: explicit_pairs
+      explicit_pairs:
+        - [probe_pythia_70m, probe_pythia_160m]
+        - [probe_pythia_160m, probe_pythia_410m]
+        - [probe_pythia_410m, probe_pythia_1b]
+        - [probe_pythia_1b, probe_pythia_1p4b]
+        - [probe_pythia_1p4b, probe_pythia_2p8b]
+        - [probe_pythia_2p8b, probe_pythia_6p9b]
+      output_subdir: diffusion_merge_pairwise_ot
+
+  - name: phate_targets_410m
+    target: manylatents.pipeline.stages.phate_target.PHATETargetStage
+    depends_on: [diffusion_merge_pairwise_ot]
+    params:
+      source_stage: diffusion_merge_pairwise_ot
+      source_key: merged_diffusion_operators
+      output_subdir: phate_targets_410m
+      output_suffix: __pythia-410m__phate_target.npy
+      n_components: 1024
+      random_state: ${seed}
+      knn: 15
+      t: auto
+      decay: 40
+      gamma: 1.0
+      n_pca: null
+      n_landmark: null
+      n_jobs: -1
+      verbose: false
+      fit_fraction: 1.0
+
+  - name: phate_targets_1p4b
+    target: manylatents.pipeline.stages.phate_target.PHATETargetStage
+    depends_on: [diffusion_merge_pairwise_ot]
+    params:
+      source_stage: diffusion_merge_pairwise_ot
+      source_key: merged_diffusion_operators
+      output_subdir: phate_targets_1p4b
+      output_suffix: __pythia-1.4b__phate_target.npy
+      n_components: 2048
+      random_state: ${seed}
+      knn: 15
+      t: auto
+      decay: 40
+      gamma: 1.0
+      n_pca: null
+      n_landmark: null
+      n_jobs: -1
+      verbose: false
+      fit_fraction: 1.0
+
+  - name: projection_alignment_410m
+    target: manylatents.pipeline.stages.projection_alignment.ProjectionAlignmentStage
+    depends_on: [probe_pythia_410m, phate_targets_410m]
+    params:
+      source_stages: [probe_pythia_410m]
+      target_stage: phate_targets_410m
+      target_key: phate_targets
+      target_selection: by_source_index
+      raw_activations_key: raw_activations_dir
+      fallback_source_key: embeddings
+      raw_activation_glob: '*.npy'
+      source_file_index: -1
+      test_fraction: 0.2
+      random_state: ${seed}
+      ridge_alpha: 1.0e-6
+      fit_intercept: false
+      standardize_inputs: false
+      output_subdir: projection_alignment_410m
+
+  - name: projection_alignment_1p4b
+    target: manylatents.pipeline.stages.projection_alignment.ProjectionAlignmentStage
+    depends_on: [probe_pythia_1p4b, phate_targets_1p4b]
+    params:
+      source_stages: [probe_pythia_1p4b]
+      target_stage: phate_targets_1p4b
+      target_key: phate_targets
+      target_selection: by_source_index
+      raw_activations_key: raw_activations_dir
+      fallback_source_key: embeddings
+      raw_activation_glob: '*.npy'
+      source_file_index: -1
+      test_fraction: 0.2
+      random_state: ${seed}
+      ridge_alpha: 1.0e-6
+      fit_intercept: false
+      standardize_inputs: false
+      output_subdir: projection_alignment_1p4b
+
+  - name: projection_controls_410m
+    target: manylatents.pipeline.stages.projection_controls.ProjectionControlsStage
+    depends_on: [projection_alignment_410m, probe_pythia_410m, phate_targets_410m]
+    params:
+      projection_stage: projection_alignment_410m
+      projection_report_key: projection_report_json
+      source_stages: [probe_pythia_410m]
+      target_stage: phate_targets_410m
+      target_key: phate_targets
+      target_selection: by_source_index
+      raw_activations_key: raw_activations_dir
+      fallback_source_key: embeddings
+      test_fraction: 0.2
+      random_state: ${seed}
+      ridge_alpha: 1.0e-6
+      fit_intercept: false
+      standardize_inputs: false
+      run_no_match: true
+      run_random_target: true
+      run_mean_baseline: true
+      output_subdir: projection_controls_410m
+
+  - name: projection_controls_1p4b
+    target: manylatents.pipeline.stages.projection_controls.ProjectionControlsStage
+    depends_on: [projection_alignment_1p4b, probe_pythia_1p4b, phate_targets_1p4b]
+    params:
+      projection_stage: projection_alignment_1p4b
+      projection_report_key: projection_report_json
+      source_stages: [probe_pythia_1p4b]
+      target_stage: phate_targets_1p4b
+      target_key: phate_targets
+      target_selection: by_source_index
+      raw_activations_key: raw_activations_dir
+      fallback_source_key: embeddings
+      test_fraction: 0.2
+      random_state: ${seed}
+      ridge_alpha: 1.0e-6
+      fit_intercept: false
+      standardize_inputs: false
+      run_no_match: true
+      run_random_target: true
+      run_mean_baseline: true
+      output_subdir: projection_controls_1p4b
+
+  - name: projection_sheet_pairwise_ot_4096
+    target: manylatents.pipeline.stages.report_combine.ReportCombineStage
+    depends_on: [projection_controls_410m, projection_controls_1p4b]
+    params:
+      source_stages: [projection_controls_410m, projection_controls_1p4b]
+      source_key: projection_experiment_sheet_json
+      output_subdir: projection_sheet_pairwise_ot_4096
+      output_prefix: projection_experiment_sheet_direct_pairwise_ot_4096
+
+  - name: final_evaluation_pairwise_ot_4096
+    target: manylatents.pipeline.stages.final_evaluation.FinalEvaluationStage
+    depends_on: [projection_sheet_pairwise_ot_4096]
+    params:
+      sheet_stage: projection_sheet_pairwise_ot_4096
+      sheet_key: combined_sheet_json
+      probe_scores_key: scores
+      output_subdir: final_evaluation_pairwise_ot_4096
+      output_prefix: projection_final_evaluation_direct_pairwise_ot_4096

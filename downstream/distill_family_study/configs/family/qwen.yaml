@@ -1,0 +1,26 @@
+# @package family
+
+name: qwen
+architecture: decoder_only
+alignment_side: decoder
+model_family: causal_lm
+teacher:
+  model_name_or_path: Qwen/Qwen2.5-14B
+  model_revision: main
+  trust_remote_code: true
+student:
+  model_name_or_path: Qwen/Qwen2.5-0.5B
+  model_revision: main
+  trust_remote_code: true
+  init_from_scratch: true
+  penultimate_dim: 896
+tokenizer_name: Qwen/Qwen2.5-0.5B
+candidate_teachers:
+  - Qwen/Qwen2.5-14B
+candidate_students:
+  - Qwen/Qwen2.5-0.5B
+  - Qwen/Qwen2.5-1.5B
+  - Qwen/Qwen2.5-3B
+layer_paths:
+  second: model.layers[1]
+  penultimate: model.layers[-2]

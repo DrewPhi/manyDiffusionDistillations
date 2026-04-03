@@ -5,6 +5,12 @@ _target_: manylatents.lightning.hf_trainer.HFTrainerModule
 config:
   _target_: manylatents.lightning.hf_trainer.HFTrainerConfig
   model_name_or_path: "gpt2"
+  model_revision: null
+  init_mode: pretrained  # pretrained | from_config
+  model_config_name_or_path: null
+  model_config_overrides: null
+  tokenizer_name: null
+  tokenizer_revision: null
   learning_rate: 2e-5
   weight_decay: 0.0
   warmup_steps: 100

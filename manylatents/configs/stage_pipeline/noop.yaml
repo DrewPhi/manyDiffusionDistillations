@@ -1,0 +1,14 @@
+run_id: ${name}
+output_root: ${output_dir}/pipelines
+resume: true
+stages:
+  - name: first
+    target: manylatents.pipeline.stages.noop.NoOpStage
+    depends_on: []
+    params:
+      message: first
+  - name: second
+    target: manylatents.pipeline.stages.noop.NoOpStage
+    depends_on: [first]
+    params:
+      message: second

@@ -1,0 +1,82 @@
+run_id: ${name}
+output_root: ${output_dir}/pipelines
+resume: true
+stages:
+  - name: probe_small
+    target: manylatents.pipeline.stages.probe_extraction.ProbeExtractionStage
+    depends_on: []
+    params:
+      output_subdir: probe_small
+      probe_callback_path: callbacks.trainer.probe
+      config_overrides:
+        algorithms:
+          lightning:
+            config:
+              model_name_or_path: gpt2
+
+  - name: probe_medium
+    target: manylatents.pipeline.stages.probe_extraction.ProbeExtractionStage
+    depends_on: []
+    params:
+      output_subdir: probe_medium
+      probe_callback_path: callbacks.trainer.probe
+      config_overrides:
+        algorithms:
+          lightning:
+            config:
+              model_name_or_path: gpt2-medium
+
+  - name: diffusion_merge
+    target: manylatents.pipeline.stages.diffusion_merge.DiffusionMergeStage
+    depends_on: [probe_small, probe_medium]
+    params:
+      source_stages: [probe_small, probe_medium]
+      source_key: diffusion_operators
+      operator_index: -1
+      strategy: frobenius_mean
+      normalize_output: true
+      merge_mode: all
+      output_subdir: diffusion_merge
+
+  - name: phate_targets
+    target: manylatents.pipeline.stages.phate_target.PHATETargetStage
+    depends_on: [diffusion_merge]
+    params:
+      source_stage: diffusion_merge
+      source_key: merged_diffusion_operators
+      output_subdir: phate_targets
+      output_suffix: __phate_target.npy
+      n_components: 2
+      random_state: ${seed}
+      knn: 5
+      t: 15
+      decay: 40
+      gamma: 1.0
+      n_pca: null
+      n_landmark: null
+      n_jobs: -1
+      verbose: false
+      fit_fraction: 1.0
+      backend: null
+      device: null
+      neighborhood_size: null
+
+  - name: projection_alignment
+    target: manylatents.pipeline.stages.projection_alignment.ProjectionAlignmentStage
+    depends_on: [probe_small, probe_medium, phate_targets]
+    params:
+      source_stages: [probe_small, probe_medium]
+      target_stage: phate_targets
+      target_key: phate_targets
+      target_selection: single
+      target_index: 0
+      raw_activations_key: raw_activations_dir
+      fallback_source_key: embeddings
+      raw_activation_glob: '*.npy'
+      source_file_index: -1
+      test_fraction: 0.2
+      random_state: ${seed}
+      ridge_alpha: 1.0e-3
+      fit_intercept: true
+      standardize_inputs: true
+      output_subdir: projection_alignment

@@ -1,0 +1,15 @@
+# @package _global_
+# Legacy Pythia entrypoint preserved as a thin alias for the generalized
+# family-study template. This keeps current commands stable while making the
+# family-agnostic path the single source of truth.
+
+defaults:
+  - distill_family_study_template
+  - _self_
+
+name: pythia_distill_sweep_template
+
+stage_pipeline:
+  params:
+    reporting:
+      spreadsheet_name: pythia_distill_sweep_results

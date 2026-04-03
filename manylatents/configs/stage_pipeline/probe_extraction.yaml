@@ -1,0 +1,16 @@
+run_id: ${name}
+output_root: ${output_dir}/pipelines
+resume: true
+stages:
+  - name: probe_extraction
+    target: manylatents.pipeline.stages.probe_extraction.ProbeExtractionStage
+    depends_on: []
+    params:
+      output_subdir: probe_extraction
+      probe_callback_path: callbacks.trainer.probe
+      config_overrides: {}
+      diffusion:
+        knn: 15
+        alpha: 1.0
+        symmetric: false
+        metric: euclidean

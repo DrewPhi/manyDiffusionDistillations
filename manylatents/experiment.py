@@ -23,10 +23,24 @@ from torch.utils.data import DataLoader
 from manylatents.algorithms.latent.latent_module_base import LatentModule
 from manylatents.callbacks.embedding.base import EmbeddingCallback, ColormapInfo
 from manylatents.utils.data import determine_data_source
+from manylatents.utils.lightning_adapters import WandbRunAdapter
 from manylatents.utils.metrics import compute_knn, compute_eigenvalues, flatten_and_unroll_metrics
 from manylatents.utils.utils import check_or_make_dirs, load_precomputed_embeddings, setup_logging
 
 logger = logging.getLogger(__name__)
+
+
+def _wandb_init_kwargs(cfg: DictConfig) -> Dict[str, Any]:
+    kwargs: Dict[str, Any] = {
+        "project": cfg.logger.get("project", cfg.project),
+        "name": cfg.logger.get("name", cfg.name),
+        "config": OmegaConf.to_container(cfg, resolve=True),
+        "mode": cfg.logger.get("mode", "online"),
+    }
+    entity = cfg.logger.get("entity")
+    if entity:
+        kwargs["entity"] = entity
+    return kwargs
 
 
 def should_disable_wandb(cfg: DictConfig) -> bool:
@@ -131,6 +145,8 @@ def instantiate_trainer(
     trainer_kwargs.pop("_target_", None)
     trainer_kwargs.pop("callbacks", None)
     trainer_kwargs.pop("logger",    None)
+    # Lightning does not accept some explicit None values (e.g., max_steps=None).
+    trainer_kwargs = {k: v for k, v in trainer_kwargs.items() if v is not None}
 
     if lightning_callbacks:
         trainer_kwargs["callbacks"] = lightning_callbacks
@@ -462,17 +478,18 @@ def run_algorithm(cfg: DictConfig, input_data_holder: Optional[Dict] = None) -> 
 
     # Initialize wandb if logger config is provided and not disabled
     wandb_run = None
+    owns_wandb_run = False
     wandb_disabled = should_disable_wandb(cfg) or wandb is None
 
     if not wandb_disabled and cfg.logger is not None:
-        logger.info(f"Initializing wandb logger: {OmegaConf.to_yaml(cfg.logger)}")
-        # Call wandb.init directly to avoid hydra.instantiate config parameter conflict
-        wandb_run = wandb.init(
-            project=cfg.logger.get("project", cfg.project),
-            name=cfg.logger.get("name", cfg.name),
-            config=OmegaConf.to_container(cfg, resolve=True),
-            mode=cfg.logger.get("mode", "online"),
-        )
+        if wandb is not None and wandb.run is not None:
+            wandb_run = wandb.run
+            logger.info("Reusing active wandb run: %s", wandb_run.id)
+        else:
+            logger.info(f"Initializing wandb logger: {OmegaConf.to_yaml(cfg.logger)}")
+            # Call wandb.init directly to avoid hydra.instantiate config parameter conflict
+            wandb_run = wandb.init(**_wandb_init_kwargs(cfg))
+            owns_wandb_run = True
     else:
         logger.info("WandB logging disabled - skipping wandb initialization")
 
@@ -519,8 +536,11 @@ def run_algorithm(cfg: DictConfig, input_data_holder: Optional[Dict] = None) -> 
     # Use the centralized should_disable_wandb() check for consistency
     loggers = []
     if not wandb_disabled and cfg.logger is not None:
-        for lg_conf in cfg.trainer.get("logger", {}).values():
-            loggers.append(hydra.utils.instantiate(lg_conf))
+        if wandb_run is not None:
+            loggers.append(WandbRunAdapter(wandb_run))
+        else:
+            for lg_conf in cfg.trainer.get("logger", {}).values():
+                loggers.append(hydra.utils.instantiate(lg_conf))
         logger.info(f"Trainer loggers enabled: {len(loggers)} logger(s)")
     else:
         logger.info("Trainer loggers disabled (WandB disabled)")
@@ -624,7 +644,7 @@ def run_algorithm(cfg: DictConfig, input_data_holder: Optional[Dict] = None) -> 
             logger.info(f"Auto-logged {len(scalar_metrics)} metrics to wandb: {list(scalar_metrics.keys())}")
 
     # Clean up wandb run if it was initialized
-    if wandb_run is not None:
+    if wandb_run is not None and owns_wandb_run:
         wandb.finish()
 
     return embeddings
@@ -654,28 +674,18 @@ def run_pipeline(cfg: DictConfig, input_data_holder: Optional[Dict] = None) -> D
     wandb_disabled = should_disable_wandb(cfg) or wandb is None
 
     # Initialize WandB based on configuration (respects logger=None, debug=True, and WANDB_MODE)
-    if wandb is not None:
-        if wandb_disabled:
-            logger.info("Initializing WandB in disabled mode")
-            wandb_context = wandb.init(
-                project=cfg.project,
-                name=cfg.name,
-                config=OmegaConf.to_container(cfg, resolve=True),
-                mode="disabled",
-            )
+    owns_wandb_run = False
+    active_run = None
+    if not wandb_disabled and wandb is not None:
+        if wandb.run is not None:
+            active_run = wandb.run
+            logger.info("Reusing active wandb run: %s", active_run.id)
         else:
             logger.info("Initializing WandB in online mode")
-            wandb_context = wandb.init(
-                project=cfg.project,
-                name=cfg.name,
-                config=OmegaConf.to_container(cfg, resolve=True),
-                mode="online",
-            )
-    else:
-        from contextlib import nullcontext
-        wandb_context = nullcontext()
+            active_run = wandb.init(**_wandb_init_kwargs(cfg))
+            owns_wandb_run = True
 
-    with wandb_context as run:
+    try:
         lightning.seed_everything(cfg.seed, workers=True)
 
         # --- One-time setup: Create initial datamodule, trainer, callbacks ---
@@ -696,8 +706,11 @@ def run_pipeline(cfg: DictConfig, input_data_holder: Optional[Dict] = None) -> D
         # Setup loggers (use same logic as run_algorithm for consistency)
         loggers = []
         if not wandb_disabled and cfg.logger is not None:
-            for lg_conf in cfg.trainer.get("logger", {}).values():
-                loggers.append(hydra.utils.instantiate(lg_conf))
+            if active_run is not None:
+                loggers.append(WandbRunAdapter(active_run))
+            else:
+                for lg_conf in cfg.trainer.get("logger", {}).values():
+                    loggers.append(hydra.utils.instantiate(lg_conf))
             logger.info(f"Trainer loggers enabled: {len(loggers)} logger(s)")
         else:
             logger.info("Trainer loggers disabled (WandB disabled)")
@@ -864,7 +877,8 @@ def run_pipeline(cfg: DictConfig, input_data_holder: Optional[Dict] = None) -> D
                 wandb.log(scalar_metrics)
                 logger.info(f"Auto-logged {len(scalar_metrics)} metrics to wandb: {list(scalar_metrics.keys())}")
 
-        if wandb is not None and wandb.run:
+    finally:
+        if wandb is not None and owns_wandb_run and wandb.run is not None:
             wandb.finish()
 
         return embeddings

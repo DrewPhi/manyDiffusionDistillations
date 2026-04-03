@@ -1,6 +1,10 @@
 # Data and outputs (anchored to repo root so manylatents/data/ is not excluded)
 /data/
 /outputs/
+/results/
+/representationvisualizations/
+/scripts/outputs/
+/.codex/
 
 # python cache files.
 __pycache__/

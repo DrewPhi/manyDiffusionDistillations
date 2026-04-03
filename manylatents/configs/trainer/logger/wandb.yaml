@@ -1,12 +1,12 @@
 wandb:
   _target_: lightning.pytorch.loggers.wandb.WandbLogger
-  project: "ManyLatents"
+  project: ${oc.env:WANDB_PROJECT,ManyLatents}
   name: ${name}
   log_model: false
   save_dir: "."
   offline: False 
   id: null
-  # entity: "" 
+  entity: ${oc.env:WANDB_ENTITY,null}
   prefix: ""
   job_type: "train"
   group: ""

@@ -82,13 +82,13 @@ class ActivationTrajectoryCallback(Callback):
         # Option 1: Pass probe_loader directly (for testing)
         callback = ActivationTrajectoryCallback(
             probe_loader=probe_loader,
-            layer_specs=[LayerSpec("transformer.h[-1]")],
+            layer_specs=[LayerSpec("transformer.h[-2].mlp")],
             trigger=ProbeTrigger(every_n_steps=100),
         )
 
         # Option 2: Let callback fetch from datamodule (for experiments)
         callback = ActivationTrajectoryCallback(
-            layer_specs=[LayerSpec("transformer.h[-1]")],
+            layer_specs=[LayerSpec("transformer.h[-2].mlp")],
             trigger=ProbeTrigger(every_n_steps=100),
         )
         # Datamodule must have probe_dataloader() method
@@ -176,7 +176,7 @@ class ActivationTrajectoryCallback(Callback):
 
         # Get activations as numpy arrays
         activations = self.extractor.get_activations()
-        return {path: acts.cpu().numpy() if isinstance(acts, torch.Tensor) else acts
+        return {path: acts.float().cpu().numpy() if isinstance(acts, torch.Tensor) else acts
                 for path, acts in activations.items()}
 
     def _maybe_probe(

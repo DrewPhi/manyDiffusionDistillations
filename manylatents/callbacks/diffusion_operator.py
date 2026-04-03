@@ -91,7 +91,7 @@ class DiffusionGauge:
         symmetric: If True, return symmetric operator D^{-1/2} K D^{-1/2}
         metric: Distance metric for pairwise computation
     """
-    knn: Optional[int] = 15
+    knn: Optional[int] = 35
     alpha: float = 1.0
     symmetric: bool = False
     metric: str = "euclidean"

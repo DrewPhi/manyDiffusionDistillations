@@ -1,0 +1,26 @@
+# @package family
+
+name: t5
+architecture: encoder_decoder
+alignment_side: encoder
+model_family: seq2seq_lm
+teacher:
+  model_name_or_path: google-t5/t5-3b
+  model_revision: main
+  trust_remote_code: false
+student:
+  model_name_or_path: google-t5/t5-small
+  model_revision: main
+  trust_remote_code: false
+  init_from_scratch: true
+  penultimate_dim: 512
+tokenizer_name: google-t5/t5-small
+candidate_teachers:
+  - google-t5/t5-3b
+candidate_students:
+  - google-t5/t5-small
+  - google-t5/t5-base
+  - google-t5/t5-large
+layer_paths:
+  second: encoder.block[1]
+  penultimate: encoder.block[-2]

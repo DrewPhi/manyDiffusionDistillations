@@ -1,0 +1,14 @@
+# @package layer_scheme
+
+name: penultimate_only
+teacher_layer_specs:
+  - ${family.layer_paths.penultimate}
+student_layer_specs:
+  - ${family.layer_paths.penultimate}
+layer_loss_weights:
+  - 1.0
+teacher_probe_layer_specs:
+  - _target_: manylatents.lightning.hooks.LayerSpec
+    path: ${family.layer_paths.penultimate}
+    extraction_point: output
+    reduce: mean

@@ -4,7 +4,8 @@
 
 logger:
   _target_: wandb.init
-  project: ${project}
+  project: ${oc.env:WANDB_PROJECT,${project}}
   name: ${name}
-  mode: online
+  entity: ${oc.env:WANDB_ENTITY,null}
+  mode: ${oc.env:WANDB_MODE,online}
   # config is set programmatically in experiment.py

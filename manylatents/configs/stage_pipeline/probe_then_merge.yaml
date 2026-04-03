@@ -1,0 +1,49 @@
+run_id: ${name}
+output_root: ${output_dir}/pipelines
+resume: true
+stages:
+  - name: probe_small
+    target: manylatents.pipeline.stages.probe_extraction.ProbeExtractionStage
+    depends_on: []
+    params:
+      output_subdir: probe_small
+      probe_callback_path: callbacks.trainer.probe
+      config_overrides:
+        algorithms:
+          lightning:
+            config:
+              model_name_or_path: gpt2
+      diffusion:
+        knn: 15
+        alpha: 1.0
+        symmetric: false
+        metric: euclidean
+
+  - name: probe_medium
+    target: manylatents.pipeline.stages.probe_extraction.ProbeExtractionStage
+    depends_on: []
+    params:
+      output_subdir: probe_medium
+      probe_callback_path: callbacks.trainer.probe
+      config_overrides:
+        algorithms:
+          lightning:
+            config:
+              model_name_or_path: gpt2-medium
+      diffusion:
+        knn: 15
+        alpha: 1.0
+        symmetric: false
+        metric: euclidean
+
+  - name: diffusion_merge
+    target: manylatents.pipeline.stages.diffusion_merge.DiffusionMergeStage
+    depends_on: [probe_small, probe_medium]
+    params:
+      source_stages: [probe_small, probe_medium]
+      source_key: diffusion_operators
+      operator_index: -1
+      strategy: frobenius_mean
+      normalize_output: true
+      merge_mode: all
+      output_subdir: diffusion_merge

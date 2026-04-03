@@ -1,0 +1,31 @@
+# Text data config for local Mila Pile uncopyrighted mirror.
+_target_: manylatents.data.text.TextDataModule
+
+# Use local dataset path on cluster storage.
+dataset_name: "json"
+dataset_config: null
+dataset_path: "/network/datasets/pile.var/pile_uncopyrighted/pile-uncopyrighted"
+dataset_revision: null
+
+# Adjust split names if the local dataset uses different keys.
+train_split: "train"
+val_split: "validation"
+probe_split: "validation"
+
+text_field: "text"
+tokenizer_name: "EleutherAI/pythia-70m"
+max_length: 1024
+batch_size: 8
+num_workers: 0
+
+# Approximate train budget in tokens; sequences are max_length-padded.
+token_budget: 5000000000
+probe_n_samples: 1024
+
+# Optional persisted probe IDs for strict reproducibility across runs.
+probe_ids_path: null
+persist_probe_ids: false
+
+seed: ${seed}
+data_order_seed: ${seed}
+dataloader_seed: ${seed}

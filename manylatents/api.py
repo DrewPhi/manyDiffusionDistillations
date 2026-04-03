@@ -36,6 +36,7 @@ from omegaconf import DictConfig, OmegaConf
 # IMPORTANT: Import configs to register base_config with Hydra ConfigStore
 import manylatents.configs
 from manylatents.experiment import run_algorithm, run_pipeline
+from manylatents.pipeline import run_stage_pipeline
 
 logger = logging.getLogger(__name__)
 
@@ -159,8 +160,12 @@ def run(
         cfg.data = OmegaConf.create(data_cfg)
 
     # Smart routing: mirror main.py logic
+    is_stage_pipeline = hasattr(cfg, 'stage_pipeline') and cfg.stage_pipeline is not None
     is_pipeline = hasattr(cfg, 'pipeline') and cfg.pipeline is not None and len(cfg.pipeline) > 0
 
+    if is_stage_pipeline:
+        logger.info("API detected stage_pipeline configuration. Routing to run_stage_pipeline()...")
+        return run_stage_pipeline(cfg)
     if is_pipeline:
         # Route to pipeline engine
         logger.info("API detected pipeline configuration. Routing to run_pipeline()...")

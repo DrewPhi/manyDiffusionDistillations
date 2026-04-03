@@ -1,0 +1,188 @@
+# @package _global_
+# Publication-scale within-family distillation study.
+#
+# This config is the declarative source of truth for the README plan:
+#   3 families x 3 students x 3 lambda values x 2 layer schemes = 54 runs
+#
+# It is intentionally separate from experiment/stage_pipeline configs. The study
+# layer answers "which runs should exist?" while experiment configs answer
+# "how does one run execute?".
+
+study:
+  name: within_family_publication
+  description: >
+    Within-family PHATE-target distillation matrix across Pythia, Qwen2.5, and
+    T5 with fixed teachers, three student scales per family, three
+    lambda_align values, and two layer-matching schemes.
+  experiment: distill_family_study_template
+  family_order:
+    - pythia
+    - qwen
+    - t5
+  layer_schemes:
+    - penultimate_only
+    - second_plus_penultimate
+  seeds:
+    - 42
+
+  shared:
+    output_dir: ./outputs
+    logger: wandb
+    reusable_artifacts:
+      probe_teacher_manifest_path: null
+      phate_teacher_target_manifest_path: null
+    token_budget: 5000000000
+    max_length: 1024
+    train_example_offset: 0
+    lm_loss_weight: 1.0
+    probe:
+      size_multiplier: 2
+      train_fraction: 0.8
+      eval_fraction: 0.2
+      sampling: random
+      save_ids: false
+    diffusion:
+      knn: 35
+      alpha: 1.0
+      symmetric: false
+      metric: euclidean
+    phate:
+      knn: 35
+      t: auto
+      decay: 40
+      gamma: 1.0
+      fit_fraction: 1.0
+      procrustes_align: true
+    training:
+      precision: bf16
+      global_batch_size: 512
+      micro_batch_size: 8
+      grad_accum_steps: 64
+      max_steps: null
+      eval_every_n_steps: 1000
+      save_every_n_steps: 1000
+      save_top_k: 3
+      gradient_clip_norm: 1.0
+      train_history_every_n_steps: 10
+    optimizer:
+      name: adamw
+      learning_rate: 3.0e-4
+      betas: [0.9, 0.95]
+      eps: 1.0e-8
+      weight_decay: 0.1
+    lr_scheduler:
+      type: cosine
+      warmup_steps: 2000
+      min_lr: 3.0e-5
+    regularization:
+      dropout: 0.0
+      label_smoothing: 0.0
+    alignment:
+      loss: mse
+      mse_reduction: mean
+      lambda_values: [0.0, 0.5, 1.0]
+      lambda_schedule: constant
+      lambda_ramp_steps: 0
+      scheduled_lambda_values: [1.0]
+      scheduled_lambda_schedule: ramp
+      scheduled_lambda_ramp_fraction: 0.2
+      batch_size: 16
+      eval_batch_size: 8
+      sample_every_n_steps: 1
+    seeds:
+      global_seed: 42
+      model_init_seed: null
+      data_order_seed: 42
+      dataloader_seed: null
+      phate_seed: 42
+
+  families:
+    pythia:
+      family_config: pythia
+      teacher:
+        model_name_or_path: EleutherAI/pythia-6.9b
+        model_revision: main
+        trust_remote_code: false
+      tokenizer_name: EleutherAI/pythia-410m
+      students:
+        - key: pythia_410m
+          model_name_or_path: EleutherAI/pythia-410m
+          model_revision: main
+          trust_remote_code: false
+          init_from_scratch: true
+          penultimate_dim: 1024
+          tokenizer_name: EleutherAI/pythia-410m
+        - key: pythia_1b
+          model_name_or_path: EleutherAI/pythia-1b
+          model_revision: main
+          trust_remote_code: false
+          init_from_scratch: true
+          penultimate_dim: 2048
+          tokenizer_name: EleutherAI/pythia-1b
+        - key: pythia_2_8b
+          model_name_or_path: EleutherAI/pythia-2.8b
+          model_revision: main
+          trust_remote_code: false
+          init_from_scratch: true
+          penultimate_dim: 2560
+          tokenizer_name: EleutherAI/pythia-2.8b
+
+    qwen:
+      family_config: qwen
+      teacher:
+        model_name_or_path: Qwen/Qwen2.5-14B
+        model_revision: main
+        trust_remote_code: true
+      tokenizer_name: Qwen/Qwen2.5-0.5B
+      students:
+        - key: qwen2_5_0_5b
+          model_name_or_path: Qwen/Qwen2.5-0.5B
+          model_revision: main
+          trust_remote_code: true
+          init_from_scratch: true
+          penultimate_dim: 896
+          tokenizer_name: Qwen/Qwen2.5-0.5B
+        - key: qwen2_5_1_5b
+          model_name_or_path: Qwen/Qwen2.5-1.5B
+          model_revision: main
+          trust_remote_code: true
+          init_from_scratch: true
+          penultimate_dim: 1536
+          tokenizer_name: Qwen/Qwen2.5-1.5B
+        - key: qwen2_5_3b
+          model_name_or_path: Qwen/Qwen2.5-3B
+          model_revision: main
+          trust_remote_code: true
+          init_from_scratch: true
+          penultimate_dim: 2048
+          tokenizer_name: Qwen/Qwen2.5-3B
+
+    t5:
+      family_config: t5
+      teacher:
+        model_name_or_path: google-t5/t5-3b
+        model_revision: main
+        trust_remote_code: false
+      tokenizer_name: google-t5/t5-small
+      students:
+        - key: t5_small
+          model_name_or_path: google-t5/t5-small
+          model_revision: main
+          trust_remote_code: false
+          init_from_scratch: true
+          penultimate_dim: 512
+          tokenizer_name: google-t5/t5-small
+        - key: t5_base
+          model_name_or_path: google-t5/t5-base
+          model_revision: main
+          trust_remote_code: false
+          init_from_scratch: true
+          penultimate_dim: 768
+          tokenizer_name: google-t5/t5-base
+        - key: t5_large
+          model_name_or_path: google-t5/t5-large
+          model_revision: main
+          trust_remote_code: false
+          init_from_scratch: true
+          penultimate_dim: 1024
+          tokenizer_name: google-t5/t5-large

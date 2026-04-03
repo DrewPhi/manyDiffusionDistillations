@@ -3,7 +3,7 @@ probe:
   _target_: manylatents.lightning.callbacks.activation_tracker.ActivationTrajectoryCallback
   layer_specs:
     - _target_: manylatents.lightning.hooks.LayerSpec
-      path: "transformer.h[-1]"
+      path: "transformer.h[-2].mlp"
       extraction_point: "output"
       reduce: "mean"
   trigger:
@@ -13,7 +13,7 @@ probe:
     on_validation_end: true
   gauge:
     _target_: manylatents.callbacks.diffusion_operator.DiffusionGauge
-    knn: 15
+    knn: 35
     alpha: 1.0
     symmetric: false
   log_to_wandb: true

@@ -1,0 +1,79 @@
+# @package _global_
+# Two-stage pipeline: probe extraction (2 models) + diffusion merge.
+#
+# Usage:
+#   uv run python -m manylatents.main experiment=probe_merge_pipeline
+
+name: probe_merge_pipeline
+project: manylatents_pipeline
+seed: 42
+debug: false
+
+defaults:
+  - override /data: wikitext
+  - override /algorithms/lightning: hf_trainer
+  - override /trainer: default
+  - override /callbacks/trainer: probe
+  - override /stage_pipeline: probe_then_merge
+  - _self_
+
+data:
+  tokenizer_name: ${algorithms.lightning.config.model_name_or_path}
+  max_length: 128
+  batch_size: 8
+  probe_n_samples: 1024
+
+algorithms:
+  lightning:
+    config:
+      model_name_or_path: gpt2
+      learning_rate: 2e-5
+      weight_decay: 0.01
+      warmup_steps: 100
+
+trainer:
+  max_epochs: 1
+  precision: 32
+  gradient_clip_val: 1.0
+  accumulate_grad_batches: 1
+  val_check_interval: 1.0
+
+stage_pipeline:
+  stages:
+    - name: probe_small
+      target: manylatents.pipeline.stages.probe_extraction.ProbeExtractionStage
+      depends_on: []
+      params:
+        output_subdir: probe_small
+        probe_callback_path: callbacks.trainer.probe
+        config_overrides:
+          logger: null
+          algorithms:
+            lightning:
+              config:
+                model_name_or_path: gpt2
+
+    - name: probe_medium
+      target: manylatents.pipeline.stages.probe_extraction.ProbeExtractionStage
+      depends_on: []
+      params:
+        output_subdir: probe_medium
+        probe_callback_path: callbacks.trainer.probe
+        config_overrides:
+          logger: null
+          algorithms:
+            lightning:
+              config:
+                model_name_or_path: gpt2-medium
+
+    - name: diffusion_merge
+      target: manylatents.pipeline.stages.diffusion_merge.DiffusionMergeStage
+      depends_on: [probe_small, probe_medium]
+      params:
+        source_stages: [probe_small, probe_medium]
+        source_key: diffusion_operators
+        operator_index: -1
+        strategy: frobenius_mean
+        normalize_output: true
+        merge_mode: all
+        output_subdir: diffusion_merge

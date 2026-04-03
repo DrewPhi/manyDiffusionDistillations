@@ -1,0 +1,1 @@
+"""Stage-pipeline config group."""

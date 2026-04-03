@@ -1,0 +1,85 @@
+# @package _global_
+# Generic downstream experiment config for within-family PHATE distillation studies.
+#
+# This is the family-agnostic version of the original Pythia-specific template.
+# The selected `family` and `layer_scheme` determine the concrete teacher/student
+# defaults and layer matching semantics.
+#
+# Default behavior remains equivalent to the current Pythia setup:
+#   family=pythia
+#   layer_scheme=penultimate_only
+#
+# Example overrides:
+#   uv run python -m manylatents.main experiment=distill_family_study_template \
+#     family=qwen \
+#     layer_scheme=second_plus_penultimate
+#
+#   uv run python -m manylatents.main experiment=distill_family_study_template \
+#     family=t5 \
+#     layer_scheme=second_plus_penultimate \
+#     stage_pipeline.params.sweep.student_model=[google-t5/t5-small,google-t5/t5-base]
+
+name: distill_family_study_template
+project: manylatents_distillation
+seed: 42
+debug: false
+
+defaults:
+  - /family: pythia
+  - /layer_scheme: penultimate_only
+  - override /data: pile_uncopyrighted
+  - override /algorithms/lightning: hf_trainer
+  - override /trainer: default
+  - override /callbacks/trainer: probe
+  - override /stage_pipeline: distill_family_study_template
+  - _self_
+
+data:
+  tokenizer_name: ${stage_pipeline.params.data.tokenizer_name}
+  dataset_name: ${stage_pipeline.params.data.dataset_name}
+  dataset_config: ${stage_pipeline.params.data.dataset_config}
+  dataset_path: ${stage_pipeline.params.data.dataset_path}
+  dataset_revision: ${stage_pipeline.params.data.dataset_revision}
+  text_field: ${stage_pipeline.params.data.text_field}
+  train_split: ${stage_pipeline.params.data.train_split}
+  val_split: ${stage_pipeline.params.data.val_split}
+  test_split: ${stage_pipeline.params.data.test_split}
+  probe_split: ${stage_pipeline.params.data.probe_split}
+  exclude_probe_from_train: ${stage_pipeline.params.data.exclude_probe_from_train}
+  max_length: ${stage_pipeline.params.data.max_length}
+  batch_size: ${stage_pipeline.params.training.micro_batch_size}
+  token_budget: ${stage_pipeline.params.data.token_budget}
+  probe_n_samples: ${stage_pipeline.params.probe.size}
+  probe_ids_path: ${stage_pipeline.params.probe.ids_path}
+  persist_probe_ids: ${stage_pipeline.params.probe.save_ids}
+  data_order_seed: ${stage_pipeline.params.seeds.data_order_seed}
+  dataloader_seed: ${stage_pipeline.params.seeds.dataloader_seed}
+
+algorithms:
+  lightning:
+    config:
+      model_name_or_path: ${stage_pipeline.params.student.model_name_or_path}
+      learning_rate: ${stage_pipeline.params.optimizer.learning_rate}
+      weight_decay: ${stage_pipeline.params.optimizer.weight_decay}
+      warmup_steps: ${stage_pipeline.params.lr_scheduler.warmup_steps}
+      adam_epsilon: ${stage_pipeline.params.optimizer.eps}
+      trust_remote_code: ${stage_pipeline.params.student.trust_remote_code}
+      torch_dtype: ${stage_pipeline.params.training.precision}
+      model_family: ${family.model_family}
+
+trainer:
+  max_epochs: 1
+  max_steps: ${stage_pipeline.params.training.max_steps}
+  precision: ${stage_pipeline.params.training.precision}
+  gradient_clip_val: ${stage_pipeline.params.training.gradient_clip_norm}
+  accumulate_grad_batches: ${stage_pipeline.params.training.grad_accum_steps}
+  val_check_interval: 1.0
+
+callbacks:
+  trainer:
+    probe:
+      log_to_wandb: false
+      save_raw: true
+
+stage_pipeline:
+  resume: true

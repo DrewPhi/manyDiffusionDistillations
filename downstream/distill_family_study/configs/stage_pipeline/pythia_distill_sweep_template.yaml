@@ -1,0 +1,8 @@
+# Legacy Pythia stage-pipeline alias.
+#
+# This wrapper preserves the old config name while delegating all real logic to
+# the generalized family-study stage pipeline.
+
+defaults:
+  - distill_family_study_template
+  - _self_
