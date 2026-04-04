@@ -61,7 +61,6 @@ params:
 
   diffusion:
     knn: 35
-    alpha: 1.0
     symmetric: false
     metric: euclidean
 
@@ -88,6 +87,7 @@ params:
     eval_every_n_steps: 1000
     save_every_n_steps: 1000
     save_top_k: 3
+    analysis_checkpoint_steps: []
     gradient_clip_norm: 1.0
     train_history_every_n_steps: 10
     lm_loss_weight: 1.0
@@ -176,7 +176,6 @@ stages:
       probe_callback_path: callbacks.trainer.probe
       diffusion:
         knn: ${stage_pipeline.params.diffusion.knn}
-        alpha: ${stage_pipeline.params.diffusion.alpha}
         symmetric: ${stage_pipeline.params.diffusion.symmetric}
         metric: ${stage_pipeline.params.diffusion.metric}
       config_overrides:
@@ -238,6 +237,7 @@ stages:
       teacher_model_revision: ${stage_pipeline.params.teacher.model_revision}
       student_model_name_or_path: ${stage_pipeline.params.student.model_name_or_path}
       student_model_revision: ${stage_pipeline.params.student.model_revision}
+      student_trust_remote_code: ${family.student.trust_remote_code}
       init_from_scratch: ${stage_pipeline.params.student.init_from_scratch}
       family_name: ${family.name}
       family_architecture: ${family.architecture}
@@ -272,6 +272,7 @@ stages:
       eval_every_n_steps: ${stage_pipeline.params.training.eval_every_n_steps}
       save_every_n_steps: ${stage_pipeline.params.training.save_every_n_steps}
       save_top_k: ${stage_pipeline.params.training.save_top_k}
+      analysis_checkpoint_steps: ${stage_pipeline.params.training.analysis_checkpoint_steps}
       gradient_clip_norm: ${stage_pipeline.params.training.gradient_clip_norm}
       train_history_every_n_steps: ${stage_pipeline.params.training.train_history_every_n_steps}
       lm_loss_weight: ${stage_pipeline.params.training.lm_loss_weight}

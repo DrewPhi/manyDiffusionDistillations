@@ -19,6 +19,37 @@ The study is a four-stage pipeline:
 
 That flow is executed by the stage-pipeline runner in core `manylatents`.
 
+## Representation Contract
+
+The downstream study does not align full tokenwise hidden states directly.
+
+For the current publication-study configs:
+
+- teacher layers are probed with `reduce: mean`
+- this mean-pools the sequence dimension and yields one vector per probe example
+- diffusion operators are built from those per-example vectors using an adaptive Gaussian kernel followed by row normalization
+- PHATE is run on the diffusion-operator-derived representation to produce a target coordinate per probe example
+- the PHATE coordinates are Procrustes-aligned to the teacher activation basis
+- the student is trained against those aligned PHATE coordinates, not against raw teacher activations
+
+This means the alignment object is:
+
+- one mean-pooled layer representation per example
+
+not:
+
+- the full `[seq_len, hidden_dim]` tokenwise activation tensor
+- the diffusion operator itself
+
+When teacher activation dimensionality does not match the PHATE target dimensionality, teacher activations may be PCA-reduced inside the Procrustes step only so the alignment is well-defined. The saved target remains the aligned PHATE coordinate system.
+
+Probe-size policy is controlled at the downstream study-materialization layer:
+
+- adaptive mode uses `probe_size = student_penultimate_dim * size_multiplier`
+- fixed mode uses an explicit `study.shared.probe.size`
+
+When fixed mode is used, the configured probe size should be chosen large enough for the largest student alignment width in the study, since PHATE target dimensionality is matched to the student representation width.
+
 ## Core vs Downstream Boundary
 
 Core `manylatents` owns:

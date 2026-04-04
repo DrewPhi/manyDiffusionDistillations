@@ -79,6 +79,16 @@ def test_publication_study_probe_size_tracks_student_penultimate_dim():
         assert run.probe_size == 2 * run.student_penultimate_dim
 
 
+def test_publication_study_can_use_fixed_probe_size():
+    cfg = _load_yaml("study", "within_family_publication.yaml")
+    cfg.study.shared.probe.size = 4096
+    runs = materialize_study(cfg)
+
+    assert runs
+    assert all(run.probe_size == 4096 for run in runs)
+    assert all(run.reproducibility["probe"]["size"] == 4096 for run in runs)
+
+
 def test_phate_target_reuse_boundary_matches_student_dimension():
     cfg = _load_yaml("study", "within_family_publication.yaml")
     runs = materialize_study(cfg)
@@ -129,3 +139,18 @@ def test_publication_study_uses_ramp_schedule_for_lambda_1():
     lambda_half_runs = [run for run in runs if run.lambda_align == 0.5]
     assert lambda_half_runs
     assert all(run.reproducibility["alignment"]["lambda_schedule"] == "constant" for run in lambda_half_runs)
+
+
+def test_full_pile_study_includes_fixed_analysis_checkpoints():
+    cfg = _load_yaml("study", "within_family_full_pile.yaml")
+    runs = materialize_study(cfg)
+
+    assert runs
+    expected_steps = [34571, 86428, 172856, 259283]
+    assert cfg.study.shared.training.analysis_checkpoint_steps == expected_steps
+    assert all(
+        "stage_pipeline.params.training.analysis_checkpoint_steps=[34571,86428,172856,259283]"
+        in " ".join(run.hydra_overrides)
+        for run in runs
+    )
+    assert all(run.reproducibility["training"]["analysis_checkpoint_steps"] == expected_steps for run in runs)

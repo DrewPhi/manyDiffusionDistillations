@@ -77,6 +77,7 @@ class DistillationSweepStage(PipelineStage):
         teacher_model_revision: str | None = None,
         student_model_name_or_path: str = "EleutherAI/pythia-70m",
         student_model_revision: str | None = None,
+        student_trust_remote_code: bool = False,
         init_from_scratch: bool = True,
         family_name: str | None = None,
         family_architecture: str | None = None,
@@ -110,6 +111,7 @@ class DistillationSweepStage(PipelineStage):
         eval_every_n_steps: int = 1000,
         save_every_n_steps: int = 1000,
         save_top_k: int = 1,
+        analysis_checkpoint_steps: Sequence[int] | None = None,
         gradient_clip_norm: float = 1.0,
         train_history_every_n_steps: int = 10,
         optimizer: Dict[str, Any] | None = None,
@@ -138,6 +140,7 @@ class DistillationSweepStage(PipelineStage):
         self.teacher_model_revision = teacher_model_revision
         self.student_model_name_or_path = student_model_name_or_path
         self.student_model_revision = student_model_revision
+        self.student_trust_remote_code = bool(student_trust_remote_code)
         self.init_from_scratch = init_from_scratch
         self.family_name = family_name
         self.family_architecture = family_architecture
@@ -193,6 +196,8 @@ class DistillationSweepStage(PipelineStage):
         self.eval_every_n_steps = eval_every_n_steps
         self.save_every_n_steps = save_every_n_steps
         self.save_top_k = save_top_k
+        self.analysis_checkpoint_steps = sorted({int(step) for step in (analysis_checkpoint_steps or []) if int(step) > 0})
+        self.analysis_checkpoint_step_set = set(self.analysis_checkpoint_steps)
         self.gradient_clip_norm = gradient_clip_norm
         self.train_history_every_n_steps = train_history_every_n_steps
 
@@ -537,6 +542,27 @@ class DistillationSweepStage(PipelineStage):
             return base_lambda * frac
         return base_lambda
 
+    @staticmethod
+    def _require_matching_alignment_width(
+        acts: torch.Tensor,
+        targets: torch.Tensor,
+        *,
+        student_layer: str,
+        teacher_layer: str,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if acts.ndim != 2 or targets.ndim != 2:
+            raise ValueError(
+                "Alignment expects 2D mean-pooled representations, got "
+                f"student shape {tuple(acts.shape)} and target shape {tuple(targets.shape)}"
+            )
+        if acts.shape[1] != targets.shape[1]:
+            raise ValueError(
+                "Alignment width mismatch between student activations and PHATE target: "
+                f"student layer '{student_layer}' has width {acts.shape[1]}, "
+                f"teacher target '{teacher_layer}' has width {targets.shape[1]}"
+            )
+        return acts, targets
+
     def _update_lr(self, optimizer: AdamW, step: int, total_steps: int, base_lr: float) -> None:
         sched_type = str(self.lr_scheduler_cfg.get("type", "none")).lower()
         warmup_steps = int(self.lr_scheduler_cfg.get("warmup_steps", 0))
@@ -566,6 +592,35 @@ class DistillationSweepStage(PipelineStage):
         if loss_val > 50:
             return float("inf")
         return float(math.exp(loss_val))
+
+    def _is_analysis_checkpoint_step(self, step: int) -> bool:
+        return int(step) in self.analysis_checkpoint_step_set
+
+    def _save_periodic_checkpoint(
+        self,
+        *,
+        model: torch.nn.Module,
+        run_output_dir: Path,
+        step: int,
+        eval_loss_for_rank: float | None,
+        best_checkpoints: List[tuple[float, Path]],
+    ) -> None:
+        ckpt_step_path = run_output_dir / f"student_step{step}.pt"
+        torch.save(model.state_dict(), ckpt_step_path)
+
+        if self._is_analysis_checkpoint_step(step):
+            analysis_ckpt_step_path = run_output_dir / f"student_analysis_step{step}.pt"
+            torch.save(model.state_dict(), analysis_ckpt_step_path)
+
+        if eval_loss_for_rank is None:
+            return
+
+        best_checkpoints.append((float(eval_loss_for_rank), ckpt_step_path))
+        best_checkpoints.sort(key=lambda x: x[0])
+        while len(best_checkpoints) > int(self.save_top_k):
+            _loss, path_to_remove = best_checkpoints.pop()
+            if path_to_remove.exists():
+                path_to_remove.unlink()
 
     def _precision_to_dtype(self) -> torch.dtype | None:
         p = str(self.precision).lower()
@@ -764,9 +819,13 @@ class DistillationSweepStage(PipelineStage):
                 weight = float(pair["weight"])
                 acts = acts_by_layer[student_layer].to(device)
                 targets = probe_buffers["targets"][teacher_layer][batch_idx].to(device)
-                d = min(acts.shape[1], targets.shape[1], int(self.penultimate_dim_student))
-                acts = acts[:, :d]
-                targets = targets[:, :d].to(dtype=acts.dtype)
+                acts, targets = self._require_matching_alignment_width(
+                    acts,
+                    targets,
+                    student_layer=student_layer,
+                    teacher_layer=teacher_layer,
+                )
+                targets = targets.to(dtype=acts.dtype)
                 mse = float(F.mse_loss(acts, targets, reduction="mean").detach().cpu().item())
                 numel = int(acts.numel())
                 per_layer_weighted_sum[student_layer] = per_layer_weighted_sum.get(student_layer, 0.0) + (mse * numel)
@@ -883,6 +942,7 @@ class DistillationSweepStage(PipelineStage):
                 aligned_targets=aligned_targets,
                 expected_probe_ids=expected_probe_ids,
             )
+            train_loader = dm.train_dataloader()
 
             hf_cfg = HFTrainerConfig(
                 model_name_or_path=combo["student_model_name_or_path"],
@@ -902,7 +962,7 @@ class DistillationSweepStage(PipelineStage):
                 weight_decay=float(self.optimizer_cfg.get("weight_decay", 0.0)),
                 warmup_steps=int(self.lr_scheduler_cfg.get("warmup_steps", 0)),
                 adam_epsilon=float(self.optimizer_cfg.get("eps", 1e-8)),
-                trust_remote_code=False,
+                trust_remote_code=self.student_trust_remote_code,
                 torch_dtype=self._precision_to_dtype(),
                 model_family="seq2seq_lm" if str(self.family_architecture).lower() == "encoder_decoder" else "causal_lm",
             )
@@ -951,7 +1011,6 @@ class DistillationSweepStage(PipelineStage):
             eval_every = int(self.eval_every_n_steps) if self.eval_every_n_steps is not None else 0
             save_every = int(self.save_every_n_steps) if self.save_every_n_steps is not None else 0
 
-            train_loader = dm.train_dataloader()
             train_iter = iter(train_loader)
             lm_losses: List[float] = []
             align_losses: List[float] = []
@@ -1017,9 +1076,13 @@ class DistillationSweepStage(PipelineStage):
                         weight = float(pair["weight"])
                         acts = acts_by_layer[student_layer]
                         probe_targets = probe_buffers["targets"][teacher_layer][sampled_idx].to(device)
-                        d = min(acts.shape[1], probe_targets.shape[1], int(self.penultimate_dim_student))
-                        acts = acts[:, :d]
-                        probe_targets = probe_targets[:, :d].to(dtype=acts.dtype)
+                        acts, probe_targets = self._require_matching_alignment_width(
+                            acts,
+                            probe_targets,
+                            student_layer=student_layer,
+                            teacher_layer=teacher_layer,
+                        )
+                        probe_targets = probe_targets.to(dtype=acts.dtype)
                         layer_loss = F.mse_loss(
                             acts.float(),
                             probe_targets.float(),
@@ -1097,16 +1160,14 @@ class DistillationSweepStage(PipelineStage):
                     )
 
                     if save_every > 0 and (step % save_every == 0 or step == steps):
-                        ckpt_step_path = run_output_dir / f"student_step{step}.pt"
-                        torch.save(model.state_dict(), ckpt_step_path)
-                        if periodic_eval_rows:
-                            eval_loss_for_rank = float(periodic_eval_rows[-1]["val_loss"])
-                            best_checkpoints.append((eval_loss_for_rank, ckpt_step_path))
-                            best_checkpoints.sort(key=lambda x: x[0])
-                            while len(best_checkpoints) > int(self.save_top_k):
-                                _loss, path_to_remove = best_checkpoints.pop()
-                                if path_to_remove.exists():
-                                    path_to_remove.unlink()
+                        eval_loss_for_rank = float(periodic_eval_rows[-1]["val_loss"]) if periodic_eval_rows else None
+                        self._save_periodic_checkpoint(
+                            model=model,
+                            run_output_dir=run_output_dir,
+                            step=step,
+                            eval_loss_for_rank=eval_loss_for_rank,
+                            best_checkpoints=best_checkpoints,
+                        )
 
             val_loss = self._eval_lm(model, dm.val_dataloader(), device=device)
             val_ppl = self._safe_perplexity(val_loss)

@@ -55,6 +55,21 @@ def _compute_total_steps(shared: dict[str, Any]) -> int | None:
     return max(1, token_budget // tokens_per_step)
 
 
+def _resolve_probe_size(shared: dict[str, Any], student_cfg: dict[str, Any]) -> int:
+    probe_cfg = shared["probe"]
+    fixed_size = probe_cfg.get("size")
+    if fixed_size is not None:
+        fixed_size = int(fixed_size)
+        if fixed_size <= 0:
+            raise ValueError("study.shared.probe.size must be > 0 when provided")
+        return fixed_size
+
+    size_multiplier = int(probe_cfg["size_multiplier"])
+    if size_multiplier <= 0:
+        raise ValueError("study.shared.probe.size_multiplier must be > 0")
+    return int(student_cfg["penultimate_dim"]) * size_multiplier
+
+
 @dataclass(frozen=True)
 class StudyRun:
     study_name: str
@@ -126,7 +141,7 @@ def _build_run(
     token_budget = None if token_budget_value is None else int(token_budget_value)
     max_length = int(shared["max_length"])
     train_example_offset = int(shared["train_example_offset"])
-    probe_size = int(student_cfg["penultimate_dim"]) * int(shared["probe"]["size_multiplier"])
+    probe_size = _resolve_probe_size(shared, student_cfg)
     total_steps = _compute_total_steps(shared)
     scheduled_lambda_values = {float(v) for v in shared["alignment"].get("scheduled_lambda_values", [])}
     if float(lambda_align) in scheduled_lambda_values:
@@ -197,6 +212,7 @@ def _build_run(
         f"stage_pipeline.params.training.eval_every_n_steps={shared['training']['eval_every_n_steps']}",
         f"stage_pipeline.params.training.save_every_n_steps={shared['training']['save_every_n_steps']}",
         f"stage_pipeline.params.training.save_top_k={shared['training']['save_top_k']}",
+        f"stage_pipeline.params.training.analysis_checkpoint_steps={_json_override(shared['training'].get('analysis_checkpoint_steps', []))}",
         f"stage_pipeline.params.training.gradient_clip_norm={shared['training']['gradient_clip_norm']}",
         f"stage_pipeline.params.training.train_history_every_n_steps={shared['training']['train_history_every_n_steps']}",
         f"stage_pipeline.params.training.lm_loss_weight={lm_loss_weight}",
@@ -269,7 +285,9 @@ def _build_run(
         },
         "probe": {
             "size": probe_size,
-            "size_multiplier": int(shared["probe"]["size_multiplier"]),
+            "size_multiplier": (
+                None if shared["probe"].get("size_multiplier") is None else int(shared["probe"]["size_multiplier"])
+            ),
             "train_fraction": float(shared["probe"]["train_fraction"]),
             "eval_fraction": float(shared["probe"]["eval_fraction"]),
             "sampling": shared["probe"]["sampling"],

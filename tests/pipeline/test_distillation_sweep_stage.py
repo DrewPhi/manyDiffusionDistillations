@@ -363,6 +363,34 @@ def test_eval_alignment_batches_probe_eval(monkeypatch):
     assert per_layer["student.layer"] == 0.0
 
 
+def test_eval_alignment_rejects_width_mismatch(monkeypatch):
+    stage = DistillationSweepStage(stage_name="distill_sweep_grid", micro_batch_size=2)
+
+    def _fake_activations(self, model, layer_paths, input_ids, attention_mask, device, detach):
+        return {layer_paths[0]: torch.ones((input_ids.shape[0], 4), dtype=torch.float32)}
+
+    monkeypatch.setattr(DistillationSweepStage, "_activations_from_batch", _fake_activations)
+
+    probe_buffers = {
+        "input_ids": torch.zeros((3, 3), dtype=torch.long),
+        "attention_mask": torch.ones((3, 3), dtype=torch.long),
+        "targets": {"teacher.layer": torch.ones((3, 5), dtype=torch.float32)},
+        "n": 3,
+    }
+
+    try:
+        stage._eval_alignment(
+            model=object(),
+            device=torch.device("cpu"),
+            probe_buffers=probe_buffers,
+            eval_idx=np.array([0, 1, 2]),
+            layer_pairs=[{"student_layer": "student.layer", "teacher_layer": "teacher.layer", "weight": 1.0}],
+        )
+        assert False, "Expected ValueError for alignment width mismatch"
+    except ValueError as exc:
+        assert "Alignment width mismatch" in str(exc)
+
+
 def test_activations_from_batch_uses_backbone_and_autocast(monkeypatch):
     stage = DistillationSweepStage(stage_name="distill_sweep_grid")
     autocast_entered = {"count": 0}
@@ -513,3 +541,37 @@ def test_cleanup_combo_resources_runs_gc_and_cuda_cleanup(monkeypatch):
     )
 
     assert calls == {"gc": 1, "cuda": 1}
+
+
+def test_save_periodic_checkpoint_keeps_analysis_copy_when_best_checkpoint_is_pruned(tmp_path):
+    stage = DistillationSweepStage(
+        stage_name="distill_sweep_grid",
+        save_top_k=1,
+        analysis_checkpoint_steps=[10],
+    )
+    run_output_dir = tmp_path / "run"
+    run_output_dir.mkdir()
+    model = torch.nn.Linear(2, 2)
+    best_checkpoints = []
+
+    stage._save_periodic_checkpoint(
+        model=model,
+        run_output_dir=run_output_dir,
+        step=10,
+        eval_loss_for_rank=5.0,
+        best_checkpoints=best_checkpoints,
+    )
+    assert (run_output_dir / "student_step10.pt").exists()
+    assert (run_output_dir / "student_analysis_step10.pt").exists()
+
+    stage._save_periodic_checkpoint(
+        model=model,
+        run_output_dir=run_output_dir,
+        step=20,
+        eval_loss_for_rank=1.0,
+        best_checkpoints=best_checkpoints,
+    )
+
+    assert not (run_output_dir / "student_step10.pt").exists()
+    assert (run_output_dir / "student_analysis_step10.pt").exists()
+    assert (run_output_dir / "student_step20.pt").exists()

@@ -44,7 +44,6 @@ params:
 
   diffusion:
     knn: 35
-    alpha: 1.0
     symmetric: false
     metric: euclidean
 
@@ -97,7 +96,6 @@ stages:
       probe_callback_path: callbacks.trainer.probe
       diffusion:
         knn: ${stage_pipeline.params.diffusion.knn}
-        alpha: ${stage_pipeline.params.diffusion.alpha}
         symmetric: ${stage_pipeline.params.diffusion.symmetric}
         metric: ${stage_pipeline.params.diffusion.metric}
       config_overrides:

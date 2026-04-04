@@ -15,8 +15,8 @@ Use these files instead of scattered narrative notes.
 
 Use these together with:
 
-- [architecture.md](/home/mila/d/drewd/newManylatents/manylatents/architecture.md)
-- [FINAL_TESTS.md](/home/mila/d/drewd/newManylatents/manylatents/FINAL_TESTS.md)
+- [architecture.md](/home/mila/d/drewd/codeReview/manyDiffusionDistillations/architecture.md)
+- [FINAL_TESTS.md](/home/mila/d/drewd/codeReview/manyDiffusionDistillations/FINAL_TESTS.md)
 - `downstream/distill_family_study/scripts/consolidate_distill_handoff.py`
 
 The gates describe what should be true. The consolidation script reads actual JSON result artifacts and summarizes what is currently true.

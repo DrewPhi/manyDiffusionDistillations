@@ -119,7 +119,6 @@ COMMON_ARGS=(
   stage_pipeline.params.probe.eval_fraction=0.2
   stage_pipeline.params.probe.save_ids=false
   stage_pipeline.params.diffusion.knn=35
-  stage_pipeline.params.diffusion.alpha=1.0
   stage_pipeline.params.diffusion.symmetric=false
   stage_pipeline.params.diffusion.metric=euclidean
   stage_pipeline.params.phate.n_components=512

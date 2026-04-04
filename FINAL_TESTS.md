@@ -2,6 +2,14 @@
 
 This file is the final pre-launch checklist for the within-family publication study.
 
+Validation claims in this file should always be interpreted as scoped to:
+
+- the current git commit being handed off
+- the `manylatents` conda environment used for launch
+- the exact commands recorded in the handoff notes
+
+If any of those change, rerun the relevant gate instead of inheriting confidence from older runs.
+
 Current validated status:
 
 - Pythia publication smoke passed: `9145958`
@@ -11,6 +19,10 @@ Current validated status:
 - the generalized family-study pipeline now works for both decoder-only and encoder-decoder families
 - the cheap final validation suite passed on job `9146930`
 - targeted study/config tests passed: `27 passed`
+  - command:
+    `pytest tests/pipeline/test_distill_study_config.py tests/pipeline/test_submit_distill_study_filters.py tests/pipeline/test_distillation_sweep_stage.py -q`
+  - environment:
+    `module load miniconda && source "$CONDA_ACTIVATE" && conda activate manylatents`
 - study manifest dry run passed with:
   - `54` run specs
   - family counts `18/18/18`
@@ -27,6 +39,10 @@ What the passing family smokes prove:
   - `sweep_results_sheet`
 - `bf16` execution is compatible with the current activation-capture path
 - T5 encoder-side layer alignment works with the generalized distillation stage
+- the current representation contract is consistent across teacher and student:
+  - probe extraction uses mean-pooled per-example layer vectors
+  - PHATE targets are aligned coordinates derived from teacher diffusion geometry
+  - training compares student mean-pooled vectors to those aligned PHATE targets
 
 What they do not prove:
 
@@ -34,6 +50,15 @@ What they do not prove:
 - resume behavior is safe after partial failures
 - artifact reuse is collision-free across a larger shared-HPC run
 - actual submitted runs from `submit_distill_study.py` succeed on the cluster end-to-end
+
+Experiment scope reminder:
+
+- this is a within-family study, not a cross-family transfer study
+- alignment is performed on mean-pooled per-example layer representations
+- the student matches aligned PHATE coordinates derived from teacher diffusion geometry
+- the deployed study path uses an adaptive Gaussian kernel with row normalization; it does not apply a separate `alpha` normalization term
+- probe size may be adaptive by student width or fixed per study; if fixed, the configured size should cover the largest student alignment width in the study
+- the full-Pile study now retains fixed analysis checkpoints at 10%, 25%, 50%, and 75% of training as `student_analysis_step{step}.pt`, in addition to `student_last.pt` and the usual best-checkpoint retention
 
 ## Completed Validation
 
@@ -48,6 +73,7 @@ These checks are now complete and green:
   - report `results/final_validation/20260402T192755Z/validation_report.md`
 - targeted pytest checks passed:
   - `tests/pipeline/test_distill_study_config.py`
+  - `tests/pipeline/test_submit_distill_study_filters.py`
   - `tests/pipeline/test_distill_study_aggregator.py`
   - `tests/pipeline/test_distillation_sweep_stage.py`
 - real launcher dry run passed through `submit_distill_study.py`
@@ -192,6 +218,19 @@ Record before pushing or handing off:
 Pass condition:
 
 - another engineer can rerun the launch procedure without guessing hidden environment assumptions
+
+Suggested handoff block to record verbatim before large submission:
+
+- git commit hash
+- output of `which python`
+- output of `python --version`
+- output of `pytest --version`
+- output of `nvidia-smi | head`
+- exact env activation commands
+- exact dry-run command
+- exact mini-launch command
+- exact aggregation command
+- exact plotting command
 
 ## What Is Left
 
