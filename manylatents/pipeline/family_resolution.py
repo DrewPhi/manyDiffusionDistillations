@@ -12,6 +12,7 @@ class FamilyLayerSpec:
     alignment_side: str
     second_layer: str
     penultimate_layer: str
+    allowed_layer_prefixes: tuple[str, ...]
 
 
 _FAMILY_SPECS: dict[str, FamilyLayerSpec] = {
@@ -21,6 +22,7 @@ _FAMILY_SPECS: dict[str, FamilyLayerSpec] = {
         alignment_side="decoder",
         second_layer="transformer.h[1]",
         penultimate_layer="transformer.h[-2]",
+        allowed_layer_prefixes=("transformer.",),
     ),
     "qwen": FamilyLayerSpec(
         family_name="qwen",
@@ -28,6 +30,7 @@ _FAMILY_SPECS: dict[str, FamilyLayerSpec] = {
         alignment_side="decoder",
         second_layer="model.layers[1]",
         penultimate_layer="model.layers[-2]",
+        allowed_layer_prefixes=("model.",),
     ),
     "t5": FamilyLayerSpec(
         family_name="t5",
@@ -35,6 +38,23 @@ _FAMILY_SPECS: dict[str, FamilyLayerSpec] = {
         alignment_side="encoder",
         second_layer="encoder.block[1]",
         penultimate_layer="encoder.block[-2]",
+        allowed_layer_prefixes=("encoder.",),
+    ),
+    "bert": FamilyLayerSpec(
+        family_name="bert",
+        architecture="encoder_only",
+        alignment_side="encoder",
+        second_layer="bert.encoder.layer[1]",
+        penultimate_layer="bert.encoder.layer[-2]",
+        allowed_layer_prefixes=("bert.encoder.",),
+    ),
+    "deberta_v3": FamilyLayerSpec(
+        family_name="deberta_v3",
+        architecture="encoder_only",
+        alignment_side="encoder",
+        second_layer="deberta.encoder.layer[1]",
+        penultimate_layer="deberta.encoder.layer[-2]",
+        allowed_layer_prefixes=("deberta.encoder.",),
     ),
 }
 
@@ -98,10 +118,13 @@ def validate_family_layers(
         )
 
     if spec.alignment_side == "encoder":
-        invalid = [layer for layer in all_layers if not str(layer).startswith("encoder.")]
+        invalid = [
+            layer
+            for layer in all_layers
+            if not any(str(layer).startswith(prefix) for prefix in spec.allowed_layer_prefixes)
+        ]
         if invalid:
             raise ValueError(
                 f"Family '{family_name}' is configured for encoder-side alignment, "
-                f"but found non-encoder layer paths: {invalid}"
+                f"but found invalid layer paths: {invalid}"
             )
-

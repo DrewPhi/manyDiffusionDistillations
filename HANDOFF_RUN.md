@@ -1,21 +1,25 @@
 # Handoff Run Note
 
-This repo contains the `manylatents` framework plus the downstream within-family PHATE-target distillation study.
+This repo contains the `manylatents` framework plus the active downstream within-family PHATE-target distillation study.
 
 Read these first:
 
 - [downstream/distill_family_study/README.md](/home/mila/d/drewd/codeReview/manyDiffusionDistillations/downstream/distill_family_study/README.md)
-- [FINAL_TESTS.md](/home/mila/d/drewd/codeReview/manyDiffusionDistillations/FINAL_TESTS.md)
 - [architecture.md](/home/mila/d/drewd/codeReview/manyDiffusionDistillations/architecture.md)
+- [FINAL_TESTS.md](/home/mila/d/drewd/codeReview/manyDiffusionDistillations/FINAL_TESTS.md)
 
-Main experiment drivers:
+Main study configs:
 
-- publication study config:
-  [`downstream/distill_family_study/configs/study/within_family_publication.yaml`](/home/mila/d/drewd/codeReview/manyDiffusionDistillations/downstream/distill_family_study/configs/study/within_family_publication.yaml)
-- full-dataset study config:
-  [`downstream/distill_family_study/configs/study/within_family_full_pile.yaml`](/home/mila/d/drewd/codeReview/manyDiffusionDistillations/downstream/distill_family_study/configs/study/within_family_full_pile.yaml)
+- publication-scale config:
+  [within_family_publication.yaml](/home/mila/d/drewd/codeReview/manyDiffusionDistillations/downstream/distill_family_study/configs/study/within_family_publication.yaml)
+- full-Pile config:
+  [within_family_full_pile.yaml](/home/mila/d/drewd/codeReview/manyDiffusionDistillations/downstream/distill_family_study/configs/study/within_family_full_pile.yaml)
+- one-GPU smoke:
+  [staged_smoke_a100_1gpu.yaml](/home/mila/d/drewd/codeReview/manyDiffusionDistillations/downstream/distill_family_study/configs/study/staged_smoke_a100_1gpu.yaml)
+- remaining-families one-GPU smoke:
+  [staged_smoke_remaining_families_a100_1gpu.yaml](/home/mila/d/drewd/codeReview/manyDiffusionDistillations/downstream/distill_family_study/configs/study/staged_smoke_remaining_families_a100_1gpu.yaml)
 
-Activate environment:
+Environment:
 
 ```bash
 module load miniconda
@@ -23,52 +27,53 @@ source "$CONDA_ACTIVATE"
 conda activate manylatents
 ```
 
-Recommended first steps:
+Current experiment surface:
 
-1. Dry-run the publication manifest:
+- families: `pythia`, `qwen`, `bert`, `deberta_v3`
+- layer schemes: `penultimate_only`, `second_plus_penultimate`
+- regimes:
+  - `staged`
+  - `control_task_only`
 
-```bash
-python downstream/distill_family_study/scripts/submit_distill_study.py
-```
+Quick operator flow:
 
-2. Launch the recommended mini slice through the real launcher:
+1. Run the targeted pytest slice from [FINAL_TESTS.md](/home/mila/d/drewd/codeReview/manyDiffusionDistillations/FINAL_TESTS.md).
+2. Materialize the smoke manifest.
+3. Launch the smoke wrapper.
+4. Launch the remaining-families smoke wrapper.
+5. Confirm the staged and control runs reach training across `pythia`, `deberta_v3`, and `qwen`.
+6. Only then materialize or submit the full-Pile study.
+
+Useful commands:
 
 ```bash
 python downstream/distill_family_study/scripts/submit_distill_study.py \
-  --submit \
-  --family pythia \
-  --family qwen \
-  --family t5 \
-  --student-key pythia_410m \
-  --student-key qwen2_5_0_5b \
-  --student-key t5_small \
-  --layer-scheme penultimate_only \
-  --lambda-align 0.0 \
-  --lambda-align 0.5
+  --study-config downstream/distill_family_study/configs/study/staged_smoke_a100_1gpu.yaml
+
+sbatch downstream/distill_family_study/scripts/run_staged_smoke_a100_1gpu.sbatch
+
+sbatch downstream/distill_family_study/scripts/run_staged_smoke_remaining_families_a100_1gpu.sbatch
+
+python downstream/distill_family_study/scripts/submit_distill_study.py \
+  --study-config downstream/distill_family_study/configs/study/within_family_full_pile.yaml
 ```
 
-3. After those runs finish, aggregate and plot:
+If resuming later to check the remaining-families smoke, inspect these first:
 
-```bash
-python downstream/distill_family_study/scripts/aggregate_distill_study.py
-python downstream/distill_family_study/scripts/plot_distill_study.py
-```
+- manifest:
+  [submission_manifest.json](/home/mila/d/drewd/codeReview/manyDiffusionDistillations/results/study_manifests/staged_smoke_remaining_families_a100_1gpu/submission_manifest.json)
+- pipeline outputs:
+  `outputs/pipelines/staged_smoke_remaining_families_a100_1gpu_*`
+- aggregate outputs:
+  `results/publication_within_family/staged_smoke_remaining_families_a100_1gpu/`
+- wrapper logs:
+  `outputs/slurm/staged_smoke_remaining_families_a100-<jobid>.out`
+  `outputs/slurm/staged_smoke_remaining_families_a100-<jobid>.err`
+- expected run count:
+  `6`
+- family order:
+  `pythia`, `deberta_v3`, `qwen`
 
-Important experiment facts:
+Use the verification gates for go/no-go decisions:
 
-- this is a within-family study, not cross-family transfer
-- alignment is on mean-pooled per-example layer representations
-- the student matches aligned PHATE coordinates derived from teacher diffusion geometry
-- the deployed study path uses an adaptive Gaussian kernel followed by row normalization
-- continuation should be described as resume from saved student weights, not exact optimizer-state resume
-
-Probe size:
-
-- adaptive mode is controlled by `study.shared.probe.size_multiplier`
-- fixed mode is controlled by `study.shared.probe.size`
-- if fixed mode is used, choose a size that covers the largest student alignment width in the study
-
-Before scaling to the full run, check the remaining launch gates in:
-
-- [FINAL_TESTS.md](/home/mila/d/drewd/codeReview/manyDiffusionDistillations/FINAL_TESTS.md)
 - [downstream/distill_family_study/verification_gates/README.md](/home/mila/d/drewd/codeReview/manyDiffusionDistillations/downstream/distill_family_study/verification_gates/README.md)

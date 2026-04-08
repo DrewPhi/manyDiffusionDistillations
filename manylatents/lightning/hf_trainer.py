@@ -9,6 +9,7 @@ from torch.optim import AdamW
 from transformers import (
     AutoConfig,
     AutoModelForCausalLM,
+    AutoModelForMaskedLM,
     AutoModelForSeq2SeqLM,
     AutoTokenizer,
     get_linear_schedule_with_warmup,
@@ -118,6 +119,8 @@ class HFTrainerModule(LightningModule):
         model_family = str(self.config.model_family).lower()
         if model_family == "seq2seq_lm":
             pretrained_cls = AutoModelForSeq2SeqLM
+        elif model_family == "masked_lm":
+            pretrained_cls = AutoModelForMaskedLM
         else:
             pretrained_cls = AutoModelForCausalLM
 

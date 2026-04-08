@@ -1,14 +1,18 @@
 # 02 Manifest Gate
 
-The study materializer must produce the expected run matrix before submission.
+The materializer must produce the expected run matrix before any large submission.
 
-Bounded publication study expected shape:
+Expected shapes:
 
-- `54` total runs
-- `18` per family
-- layer schemes:
-  - `penultimate_only`
-  - `second_plus_penultimate`
+- smoke study:
+  - `2` total runs
+  - `1` staged
+  - `1` control
+- full-Pile study:
+  - `48` total runs
+  - `24` staged
+  - `24` control
+  - balanced across `pythia`, `qwen`, `bert`, and `deberta_v3`
 
 Pass condition:
 
@@ -16,10 +20,10 @@ Pass condition:
 - `submission_manifest.json` exists
 - `run_specs/` exists
 - run count matches expectation
-- family counts match expectation
 - run names are unique
+- regime counts match expectation
 
 Evidence sources:
 
-- `results/final_validation/*/study_manifest/submission_manifest.json`
-- `results/final_validation/*/validation_report.json`
+- materialized manifests under `results/study_manifests/`
+- dry-run output from `submit_distill_study.py`

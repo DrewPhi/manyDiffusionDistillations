@@ -1,0 +1,55 @@
+# @package family
+
+name: bert
+architecture: encoder_only
+alignment_side: encoder
+model_family: masked_lm
+teacher:
+  model_name_or_path: bert-large-uncased
+  model_revision: main
+  trust_remote_code: false
+student:
+  model_name_or_path: bert-base-uncased
+  model_revision: main
+  trust_remote_code: false
+  init_from_scratch: true
+  penultimate_dim: 768
+tokenizer_name: bert-base-uncased
+candidate_teachers:
+  - bert-large-uncased
+candidate_students:
+  - bert-base-uncased
+  - google/bert_uncased_L-8_H-512_A-8
+  - google/bert_uncased_L-4_H-256_A-4
+custom_students:
+  - key: bert_11m
+    parameter_count: 11201594
+    model_name_or_path: bert-base-uncased
+    model_config_name_or_path: bert-base-uncased
+    model_revision: main
+    trust_remote_code: false
+    init_from_scratch: true
+    penultimate_dim: 256
+    tokenizer_name: bert-base-uncased
+    model_config_overrides:
+      hidden_size: 256
+      num_hidden_layers: 4
+      num_attention_heads: 4
+      intermediate_size: 1024
+  - key: bert_41m
+    parameter_count: 41404730
+    model_name_or_path: bert-base-uncased
+    model_config_name_or_path: bert-base-uncased
+    model_revision: main
+    trust_remote_code: false
+    init_from_scratch: true
+    penultimate_dim: 512
+    tokenizer_name: bert-base-uncased
+    model_config_overrides:
+      hidden_size: 512
+      num_hidden_layers: 8
+      num_attention_heads: 8
+      intermediate_size: 2048
+layer_paths:
+  second: bert.encoder.layer[1]
+  penultimate: bert.encoder.layer[-2]

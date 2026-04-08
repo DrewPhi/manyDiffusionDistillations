@@ -7,6 +7,7 @@ import logging
 import math
 import os
 from pathlib import Path
+import tempfile
 from typing import Any, Dict, Optional
 
 import numpy as np
@@ -14,6 +15,7 @@ import torch
 from lightning import LightningDataModule
 from torch.utils.data import DataLoader, Dataset, Subset
 from transformers import AutoTokenizer
+from transformers import DataCollatorForLanguageModeling
 
 
 logger = logging.getLogger(__name__)
@@ -55,6 +57,8 @@ class TextDataConfig:
     test_example_limit: Optional[int] = None
     text_field: str = "text"
     tokenizer_name: Optional[str] = None
+    lm_objective: str = "causal_lm"
+    mlm_probability: float = 0.15
     max_length: int = 128
     batch_size: int = 8
     num_workers: int = 0
@@ -91,6 +95,8 @@ class TextDataModule(LightningDataModule):
         test_example_limit: Optional[int] = None,
         text_field: str = "text",
         tokenizer_name: str = "gpt2",
+        lm_objective: str = "causal_lm",
+        mlm_probability: float = 0.15,
         max_length: int = 128,
         batch_size: int = 8,
         num_workers: int = 0,
@@ -119,6 +125,8 @@ class TextDataModule(LightningDataModule):
         self.test_example_limit = int(test_example_limit) if test_example_limit is not None else None
         self.text_field = text_field
         self.tokenizer_name = tokenizer_name
+        self.lm_objective = str(lm_objective)
+        self.mlm_probability = float(mlm_probability)
         self.max_length = max_length
         self.batch_size = batch_size
         self.num_workers = num_workers
@@ -130,6 +138,7 @@ class TextDataModule(LightningDataModule):
         self.train_subset_cache_dir = Path(train_subset_cache_dir) if train_subset_cache_dir else None
 
         self.tokenizer = None
+        self._mlm_collator = None
         self.train_dataset = None
         self.val_dataset = None
         self.test_dataset = None
@@ -264,43 +273,52 @@ class TextDataModule(LightningDataModule):
         hf_cache = os.environ.get("HF_DATASETS_CACHE")
         if hf_cache:
             return Path(hf_cache) / "manylatents_split_indices"
-        return Path.home() / ".cache" / "huggingface" / "datasets" / "manylatents_split_indices"
+        home_cache = Path.home() / ".cache" / "huggingface" / "datasets" / "manylatents_split_indices"
+        try:
+            home_cache.mkdir(parents=True, exist_ok=True)
+            return home_cache
+        except OSError:
+            fallback = Path(tempfile.gettempdir()) / "manylatents_split_indices"
+            fallback.mkdir(parents=True, exist_ok=True)
+            return fallback
 
     def _train_subset_cache_root(self) -> Path:
         if self.train_subset_cache_dir is not None:
             return self.train_subset_cache_dir
         return self._split_index_cache_root() / "train_subsets"
 
-    def _split_index_cache_path(self, split: str) -> Path:
-        key_payload = self._split_index_cache_key_payload(split)
+    def _split_index_cache_path(self, split: str, split_length: Optional[int] = None) -> Path:
+        key_payload = self._split_index_cache_key_payload(split, split_length)
         key = hashlib.sha256(
             json.dumps(key_payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
         ).hexdigest()
         return self._split_index_cache_root() / f"{key}.json"
 
-    def _split_index_cache_key_payload(self, split: str) -> Dict[str, object]:
+    def _split_index_cache_key_payload(self, split: str, split_length: Optional[int] = None) -> Dict[str, object]:
         return {
             "schema_version": SPLIT_INDEX_CACHE_SCHEMA_VERSION,
             "dataset_load_args": self._jsonable(self._dataset_load_args()),
             "split": str(split),
             "text_field": str(self.text_field),
+            "split_length": None if split_length is None else int(split_length),
         }
 
     def _split_index_cache_payload(
         self,
         split: str,
+        split_length: int,
         valid_indices: list[int],
     ) -> Dict[str, object]:
         return {
-            **self._split_index_cache_key_payload(split),
+            **self._split_index_cache_key_payload(split, split_length),
             "num_valid_indices": int(len(valid_indices)),
             "valid_indices": [int(v) for v in valid_indices],
         }
 
-    def _cache_payload_matches(self, payload: object, split: str) -> bool:
+    def _cache_payload_matches(self, payload: object, split: str, split_length: Optional[int] = None) -> bool:
         if not isinstance(payload, dict):
             return False
-        expected = self._split_index_cache_key_payload(split)
+        expected = self._split_index_cache_key_payload(split, split_length)
         for key, value in expected.items():
             if payload.get(key) != value:
                 logger.warning(
@@ -315,11 +333,15 @@ class TextDataModule(LightningDataModule):
         return isinstance(valid_indices, list)
 
     def _resolve_valid_indices(self, hf_dataset, split: str) -> list[int]:
-        cache_path = self._split_index_cache_path(split)
+        try:
+            split_length = len(hf_dataset)
+        except TypeError:
+            split_length = None
+        cache_path = self._split_index_cache_path(split, split_length)
         if cache_path.exists():
             logger.info("Split index cache hit for split='%s' at %s", split, cache_path)
             payload = json.loads(cache_path.read_text(encoding="utf-8"))
-            if self._cache_payload_matches(payload, split):
+            if self._cache_payload_matches(payload, split, split_length):
                 return [int(v) for v in payload["valid_indices"]]
             if isinstance(payload, list):
                 logger.warning(
@@ -340,7 +362,7 @@ class TextDataModule(LightningDataModule):
             if ex[self.text_field].strip()
         ]
         cache_path.parent.mkdir(parents=True, exist_ok=True)
-        payload = self._split_index_cache_payload(split, valid_indices)
+        payload = self._split_index_cache_payload(split, split_length, valid_indices)
         cache_path.write_text(json.dumps(payload), encoding="utf-8")
         logger.info(
             "Cached %d valid indices for split='%s' at %s",
@@ -573,7 +595,8 @@ class TextDataModule(LightningDataModule):
                 padding="max_length",
                 return_tensors="pt",
             )
-            tokenized["labels"] = tokenized["input_ids"].clone()
+            if self.lm_objective != "masked_lm":
+                tokenized["labels"] = tokenized["input_ids"].clone()
             return tokenized
 
         return tokenize_fn
@@ -643,6 +666,18 @@ class TextDataModule(LightningDataModule):
         )
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
+        if self.lm_objective == "masked_lm":
+            if self.tokenizer.mask_token is None:
+                raise ValueError(
+                    f"Tokenizer '{self.tokenizer_name}' does not define a mask token required for masked_lm"
+                )
+            self._mlm_collator = DataCollatorForLanguageModeling(
+                tokenizer=self.tokenizer,
+                mlm=True,
+                mlm_probability=self.mlm_probability,
+            )
+        else:
+            self._mlm_collator = None
 
         logger.info("Loading raw dataset")
         dataset = self._load_raw_dataset()
@@ -720,7 +755,11 @@ class TextDataModule(LightningDataModule):
             )
         else:
             logger.info("Materializing compact HF train subset with %d rows", len(train_source_ids))
-            train_hf_subset = dataset[self.train_split].select(train_source_ids)
+            train_split_dataset = dataset[self.train_split]
+            if hasattr(train_split_dataset, "select"):
+                train_hf_subset = train_split_dataset.select(train_source_ids)
+            else:
+                train_hf_subset = [train_split_dataset[idx] for idx in train_source_ids]
             self.train_dataset = TokenizedDataset(
                 train_hf_subset,
                 tokenize_fn,
@@ -739,7 +778,7 @@ class TextDataModule(LightningDataModule):
             batch_size=self.batch_size,
             shuffle=True,
             num_workers=self.num_workers,
-            collate_fn=self._collate_fn,
+            collate_fn=self._task_collate_fn,
             worker_init_fn=self._seed_worker,
             generator=generator,
         )
@@ -753,7 +792,7 @@ class TextDataModule(LightningDataModule):
             batch_size=self.batch_size,
             shuffle=False,
             num_workers=self.num_workers,
-            collate_fn=self._collate_fn,
+            collate_fn=self._task_collate_fn,
             worker_init_fn=self._seed_worker,
             generator=generator,
         )
@@ -767,7 +806,7 @@ class TextDataModule(LightningDataModule):
             batch_size=self.batch_size,
             shuffle=False,
             num_workers=self.num_workers,
-            collate_fn=self._collate_fn,
+            collate_fn=self._task_collate_fn,
             worker_init_fn=self._seed_worker,
             generator=generator,
         )
@@ -782,21 +821,37 @@ class TextDataModule(LightningDataModule):
             batch_size=self.batch_size,
             shuffle=False,
             num_workers=self.num_workers,
-            collate_fn=self._collate_fn,
+            collate_fn=self._stack_collate_fn,
             worker_init_fn=self._seed_worker,
             generator=generator,
         )
 
-    def _collate_fn(self, batch):
-        """Collate tokenized examples into batch."""
+    def _stack_collate_fn(self, batch):
+        """Collate tokenized examples into a deterministic batch."""
         input_ids = torch.stack([b["input_ids"] for b in batch])
         attention_mask = torch.stack([b["attention_mask"] for b in batch])
-        labels = torch.stack([b["labels"] for b in batch])
-        return {
+        payload = {
             "input_ids": input_ids,
             "attention_mask": attention_mask,
-            "labels": labels,
         }
+        if "labels" in batch[0]:
+            payload["labels"] = torch.stack([b["labels"] for b in batch])
+        return payload
+
+    def _task_collate_fn(self, batch):
+        """Collate task batches, masking tokens for MLM objectives."""
+        if self.lm_objective == "masked_lm":
+            if self._mlm_collator is None:
+                raise RuntimeError("MLM collator is not initialized; call setup() first")
+            examples = [
+                {
+                    "input_ids": item["input_ids"],
+                    "attention_mask": item["attention_mask"],
+                }
+                for item in batch
+            ]
+            return self._mlm_collator(examples)
+        return self._stack_collate_fn(batch)
 
 
 class TokenizedDataset(Dataset):
@@ -831,11 +886,13 @@ class TokenizedDataset(Dataset):
         if real_idx not in self._cache:
             example = self.hf_dataset[real_idx]
             tokenized = self.tokenize_fn({self.text_field: [example[self.text_field]]})
-            self._cache[real_idx] = {
+            cached = {
                 "input_ids": tokenized["input_ids"][0],
                 "attention_mask": tokenized["attention_mask"][0],
-                "labels": tokenized["labels"][0],
             }
+            if "labels" in tokenized:
+                cached["labels"] = tokenized["labels"][0]
+            self._cache[real_idx] = cached
         return self._cache[real_idx]
 
     def source_id_for_index(self, idx: int) -> int:

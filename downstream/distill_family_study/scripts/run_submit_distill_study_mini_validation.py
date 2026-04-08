@@ -26,7 +26,7 @@ class RunOutcome:
     family: str
     student_key: str
     layer_scheme: str
-    lambda_align: float
+    staged_training_enabled: bool
     run_spec_path: str
     slurm_job_id: str | None
     returncode: int
@@ -57,19 +57,19 @@ def _materialize_manifest(manifest_dir: Path) -> Path:
         "--family",
         "qwen",
         "--family",
-        "t5",
+        "bert",
+        "--family",
+        "deberta_v3",
         "--student-key",
         "pythia_410m",
         "--student-key",
         "qwen2_5_0_5b",
         "--student-key",
-        "t5_small",
+        "bert_11m",
+        "--student-key",
+        "deberta_v3_xsmall",
         "--layer-scheme",
         "penultimate_only",
-        "--lambda-align",
-        "0.0",
-        "--lambda-align",
-        "0.5",
     ]
     completed = _run(cmd)
     if completed.returncode != 0:
@@ -109,7 +109,7 @@ def _submit_run(row: dict[str, Any], *, prepare_hf_cache: str = "1") -> RunOutco
         family=row["family"],
         student_key=row["student_key"],
         layer_scheme=row["layer_scheme"],
-        lambda_align=float(row["lambda_align"]),
+        staged_training_enabled=bool(row["staged_training_enabled"]),
         run_spec_path=row["run_spec_path"],
         slurm_job_id=job_id or None,
         returncode=completed.returncode,
@@ -183,7 +183,7 @@ def _write_report(report_dir: Path, manifest_rows: list[dict[str, Any]], outcome
     for outcome in outcomes:
         lines.append(
             f"- {outcome.run_name}: success={outcome.success}, job_id={outcome.slurm_job_id}, "
-            f"family={outcome.family}, student={outcome.student_key}, lambda={outcome.lambda_align}"
+            f"family={outcome.family}, student={outcome.student_key}, staged={outcome.staged_training_enabled}"
         )
     lines.extend(
         [

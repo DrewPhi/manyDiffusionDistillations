@@ -1,0 +1,164 @@
+# @package _global_
+# Multi-family staged-training smoke for the remaining non-BERT families.
+#
+# Goal:
+# - exercise the same staged-plus-control pipeline surface as the BERT smoke
+# - cover one smallest in-study student for each remaining family
+# - keep Qwen last in the family order so the largest smoke case runs last
+
+study:
+  name: staged_smoke_remaining_families_a100_1gpu
+  description: >
+    Six-run PHATE-target distillation smoke across the remaining non-BERT families:
+    pythia_410m, deberta_v3_xsmall, and qwen2_5_0_5b, each with staged and
+    task-only-control regimes. Intended to validate family coverage before the
+    full within-family launch, with Qwen scheduled last.
+  experiment: distill_family_study_template
+  training_regimes:
+    - staged
+    - control_task_only
+  family_order:
+    - pythia
+    - deberta_v3
+    - qwen
+  layer_schemes:
+    - penultimate_only
+  seeds:
+    - 42
+
+  shared:
+    output_dir: ./outputs
+    logger: wandb
+    reusable_artifacts:
+      probe_teacher_manifest_path: null
+      phate_teacher_target_manifest_path: null
+    token_budget: 65536000
+    max_length: 128
+    train_example_offset: 0
+    lm_loss_weight: 1.0
+    probe:
+      size_multiplier: 2
+      train_fraction: 0.8
+      eval_fraction: 0.2
+      sampling: random
+      save_ids: true
+    diffusion:
+      knn: 35
+      symmetric: false
+      metric: euclidean
+    phate:
+      knn: 35
+      t: auto
+      decay: 40
+      gamma: 1.0
+      fit_fraction: 1.0
+      procrustes_align: true
+    training:
+      precision: bf16
+      global_batch_size: 256
+      micro_batch_size: 8
+      grad_accum_steps: 32
+      max_steps: 2000
+      eval_every_n_steps: 250
+      save_every_n_steps: 250
+      save_top_k: 2
+      analysis_checkpoint_steps: []
+      gradient_clip_norm: 1.0
+      train_history_every_n_steps: 10
+      staged_training:
+        enabled: true
+        phase1:
+          objective: alignment_only
+          min_steps: 100
+          max_steps: 250
+          eval_every_n_steps: 50
+          early_stop_patience: 3
+          early_stop_min_delta: 1.0e-4
+        phase2:
+          objective: task_only_frozen
+          max_steps: 1250
+        phase3:
+          objective: task_only_unfrozen
+          max_steps: 500
+        checkpoint_analysis:
+          enabled: true
+          phase1_snapshots: 2
+          phase2_snapshots: 3
+          phase3_snapshots: 2
+          include_phase_end: true
+    optimizer:
+      name: adamw
+      learning_rate: 3.0e-4
+      betas: [0.9, 0.95]
+      eps: 1.0e-8
+      weight_decay: 0.1
+    lr_scheduler:
+      type: cosine
+      warmup_steps: 100
+      min_lr: 3.0e-5
+    regularization:
+      dropout: 0.0
+      label_smoothing: 0.0
+    alignment:
+      loss: mse
+      mse_reduction: mean
+      batch_size: 16
+      eval_batch_size: 8
+      sample_every_n_steps: 1
+    seeds:
+      global_seed: 42
+      model_init_seed: null
+      data_order_seed: 42
+      dataloader_seed: null
+      phate_seed: 42
+
+  families:
+    pythia:
+      family_config: pythia
+      teacher:
+        model_name_or_path: EleutherAI/pythia-6.9b
+        model_revision: main
+        trust_remote_code: false
+      tokenizer_name: EleutherAI/pythia-410m
+      students:
+        - key: pythia_410m
+          model_name_or_path: EleutherAI/pythia-410m
+          model_revision: main
+          trust_remote_code: false
+          init_from_scratch: true
+          penultimate_dim: 1024
+          tokenizer_name: EleutherAI/pythia-410m
+
+    deberta_v3:
+      model_family: masked_lm
+      family_config: deberta_v3
+      teacher:
+        model_name_or_path: microsoft/deberta-v3-large
+        model_revision: main
+        trust_remote_code: false
+      tokenizer_name: microsoft/deberta-v3-base
+      students:
+        - key: deberta_v3_xsmall
+          model_name_or_path: microsoft/deberta-v3-xsmall
+          model_revision: main
+          trust_remote_code: false
+          init_from_scratch: true
+          penultimate_dim: 384
+          tokenizer_name: microsoft/deberta-v3-base
+
+    qwen:
+      model_family: causal_lm
+      family_config: qwen
+      teacher:
+        model_name_or_path: Qwen/Qwen2.5-14B
+        model_revision: main
+        trust_remote_code: true
+      tokenizer_name: Qwen/Qwen2.5-0.5B
+      students:
+        - key: qwen2_5_0_5b
+          model_name_or_path: Qwen/Qwen2.5-0.5B
+          model_revision: main
+          trust_remote_code: true
+          init_from_scratch: true
+          penultimate_dim: 896
+          tokenizer_name: Qwen/Qwen2.5-0.5B

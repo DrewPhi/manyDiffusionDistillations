@@ -17,7 +17,7 @@ def test_hf_trainer_from_config_uses_model_config_source(monkeypatch):
     class DummyConfig:
         hidden_size = 128
 
-    def fake_auto_config_from_pretrained(name, trust_remote_code=False, revision=None):
+    def fake_auto_config_from_pretrained(name, trust_remote_code=False, revision=None, **kwargs):
         calls["config_source"] = name
         calls["config_trust_remote_code"] = trust_remote_code
         calls["config_revision"] = revision
@@ -30,7 +30,7 @@ def test_hf_trainer_from_config_uses_model_config_source(monkeypatch):
         calls["from_config_kwargs"] = kwargs
         return DummyNetwork()
 
-    def fake_tokenizer_from_pretrained(name, trust_remote_code=False):
+    def fake_tokenizer_from_pretrained(name, trust_remote_code=False, **kwargs):
         calls["tokenizer_source"] = name
         calls["tokenizer_trust_remote_code"] = trust_remote_code
         return object()

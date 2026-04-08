@@ -105,7 +105,8 @@ def _load_result_rows(repo_root: Path, run_specs: list[dict[str, Any]]) -> tuple
             combined["study_family"] = run_spec["family"]
             combined["study_student_key"] = run_spec["student_key"]
             combined["study_layer_scheme"] = run_spec["layer_scheme"]
-            combined["study_lambda_align"] = run_spec["lambda_align"]
+            combined["study_training_regime"] = run_spec.get("training_regime", "staged")
+            combined["study_staged_training_enabled"] = run_spec.get("staged_training_enabled", False)
             combined["study_seed"] = run_spec["seed"]
             combined["study_probe_size"] = run_spec["probe_size"]
             combined["study_run_spec_path"] = run_spec.get("run_spec_path", "")

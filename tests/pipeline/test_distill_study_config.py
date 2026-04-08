@@ -2,7 +2,10 @@ from pathlib import Path
 
 from omegaconf import OmegaConf
 
-from downstream.distill_family_study.scripts.materialize_distill_study import materialize_study
+from downstream.distill_family_study.scripts.materialize_distill_study import (
+    expected_run_count,
+    materialize_study,
+)
 from manylatents.pipeline.family_resolution import get_family_layer_spec
 
 
@@ -15,7 +18,7 @@ def _load_yaml(*parts: str):
 
 
 def test_family_registry_has_publication_families():
-    for family_name in ("pythia", "qwen", "t5"):
+    for family_name in ("pythia", "qwen", "bert", "deberta_v3"):
         cfg = _load_yaml("family", f"{family_name}.yaml")
         resolved = get_family_layer_spec(family_name)
         assert cfg.name == family_name
@@ -28,6 +31,20 @@ def test_family_registry_has_publication_families():
         assert cfg.layer_paths.second
         assert cfg.layer_paths.penultimate
         assert len(cfg.candidate_students) >= 3
+
+
+def test_encoder_only_family_registry_supports_bert_and_deberta_v3():
+    for family_name in ("bert", "deberta_v3"):
+        cfg = _load_yaml("family", f"{family_name}.yaml")
+        resolved = get_family_layer_spec(family_name)
+        assert cfg.name == family_name
+        assert cfg.model_family == "masked_lm"
+        assert cfg.architecture == "encoder_only"
+        assert resolved is not None
+        assert resolved.second_layer == cfg.layer_paths.second
+        assert resolved.penultimate_layer == cfg.layer_paths.penultimate
+        assert cfg.custom_students
+        assert all("model_config_overrides" in student for student in cfg.custom_students)
 
 
 def test_layer_scheme_registry_expands_expected_layer_counts():
@@ -51,11 +68,11 @@ def test_layer_scheme_registry_expands_expected_layer_counts():
     assert second_plus_plain["layer_loss_weights"] == [1.0, 1.0]
 
 
-def test_publication_study_materializes_expected_54_runs():
+def test_publication_study_materializes_expected_24_runs():
     cfg = _load_yaml("study", "within_family_publication.yaml")
     runs = materialize_study(cfg)
 
-    assert len(runs) == 54
+    assert len(runs) == 48
     run_names = [run.run_name for run in runs]
     assert len(run_names) == len(set(run_names))
 
@@ -68,7 +85,7 @@ def test_publication_study_has_expected_family_student_counts():
     for run in runs:
         family_counts[run.family] = family_counts.get(run.family, 0) + 1
 
-    assert family_counts == {"pythia": 18, "qwen": 18, "t5": 18}
+    assert family_counts == {"pythia": 12, "qwen": 12, "bert": 12, "deberta_v3": 12}
 
 
 def test_publication_study_probe_size_tracks_student_penultimate_dim():
@@ -124,21 +141,54 @@ def test_materialized_run_freezes_reproducibility_metadata():
     assert repro["student"]["penultimate_dim"] == run.student_penultimate_dim
     assert repro["probe"]["size"] == run.probe_size
     assert repro["data"]["token_budget"] == run.token_budget
+    assert repro["training_regime"] in {"staged", "control_task_only"}
+    assert repro["staged_training_enabled"] == (run.training_regime == "staged")
 
 
-def test_publication_study_uses_ramp_schedule_for_lambda_1():
+def test_materialized_run_carries_custom_student_architecture_overrides():
+    cfg = _load_yaml("study", "within_family_publication.yaml")
+    cfg.study.family_order = ["pythia"]
+    cfg.study.layer_schemes = ["penultimate_only"]
+    cfg.study.families.pythia.students = [
+        {
+            "key": "pythia_custom_probe",
+            "model_name_or_path": "EleutherAI/pythia-410m",
+            "model_config_name_or_path": "EleutherAI/pythia-410m",
+            "model_revision": "main",
+            "trust_remote_code": False,
+            "init_from_scratch": True,
+            "penultimate_dim": 1024,
+            "tokenizer_name": "EleutherAI/pythia-410m",
+            "model_config_overrides": {
+                "hidden_size": 1024,
+                "num_hidden_layers": 10,
+            },
+        }
+    ]
+
+    run = materialize_study(cfg)[0]
+    override_blob = " ".join(run.hydra_overrides)
+
+    assert run.student_model_config_name_or_path == "EleutherAI/pythia-410m"
+    assert run.student_model_config_overrides == {"hidden_size": 1024, "num_hidden_layers": 10}
+    assert "stage_pipeline.params.student.model_config_name_or_path=EleutherAI/pythia-410m" in override_blob
+    assert "stage_pipeline.params.student.model_config_overrides.hidden_size=1024" in override_blob
+    assert "stage_pipeline.params.student.model_config_overrides.num_hidden_layers=10" in override_blob
+
+def test_materialized_run_carries_staged_training_overrides():
     cfg = _load_yaml("study", "within_family_publication.yaml")
     runs = materialize_study(cfg)
+    run = next(run for run in runs if run.training_regime == "staged")
 
-    lambda_one_runs = [run for run in runs if run.lambda_align == 1.0]
-    assert lambda_one_runs
-    assert all(run.reproducibility["alignment"]["lambda_schedule"] == "ramp" for run in lambda_one_runs)
-    assert all(run.reproducibility["alignment"]["lambda_ramp_fraction"] == 0.2 for run in lambda_one_runs)
-    assert all(run.reproducibility["alignment"]["lambda_ramp_steps"] == 1907 for run in lambda_one_runs)
-
-    lambda_half_runs = [run for run in runs if run.lambda_align == 0.5]
-    assert lambda_half_runs
-    assert all(run.reproducibility["alignment"]["lambda_schedule"] == "constant" for run in lambda_half_runs)
+    override_blob = " ".join(run.hydra_overrides)
+    assert run.staged_training_enabled is True
+    assert run.training_regime == "staged"
+    assert "stage_pipeline.params.training.training_regime=staged" in override_blob
+    assert "stage_pipeline.params.training.staged_training.enabled=true" in override_blob
+    assert "stage_pipeline.params.training.staged_training.phase1.objective=alignment_only" in override_blob
+    assert "stage_pipeline.params.training.staged_training.phase2.objective=task_only_frozen" in override_blob
+    assert "stage_pipeline.params.training.staged_training.phase3.objective=task_only_unfrozen" in override_blob
+    assert run.reproducibility["training"]["staged_training"]["checkpoint_analysis"]["phase2_snapshots"] == 10
 
 
 def test_full_pile_study_includes_fixed_analysis_checkpoints():
@@ -154,3 +204,52 @@ def test_full_pile_study_includes_fixed_analysis_checkpoints():
         for run in runs
     )
     assert all(run.reproducibility["training"]["analysis_checkpoint_steps"] == expected_steps for run in runs)
+
+
+def test_staged_smoke_a100_materializes_single_run():
+    cfg = _load_yaml("study", "staged_smoke_a100_1gpu.yaml")
+    runs = materialize_study(cfg)
+
+    assert len(runs) == 2
+    regimes = {run.training_regime for run in runs}
+    assert regimes == {"staged", "control_task_only"}
+    assert all(run.family == "bert" for run in runs)
+    assert all(run.student_key == "bert_11m" for run in runs)
+    assert all(run.layer_scheme == "penultimate_only" for run in runs)
+    staged = next(run for run in runs if run.training_regime == "staged")
+    control = next(run for run in runs if run.training_regime == "control_task_only")
+    assert staged.staged_training_enabled is True
+    assert control.staged_training_enabled is False
+    assert staged.reproducibility["training"]["staged_training"]["phase2"]["max_steps"] == 1250
+    assert control.reproducibility["training"]["staged_training"]["phase2"]["max_steps"] == 1250
+    assert "stage_pipeline.params.training.training_regime=control_task_only" in " ".join(control.hydra_overrides)
+
+
+def test_expected_run_count_includes_training_regimes():
+    smoke_cfg = _load_yaml("study", "staged_smoke_a100_1gpu.yaml")
+    remaining_cfg = _load_yaml("study", "staged_smoke_remaining_families_a100_1gpu.yaml")
+    full_cfg = _load_yaml("study", "within_family_full_pile.yaml")
+
+    assert expected_run_count(smoke_cfg) == 2
+    assert expected_run_count(remaining_cfg) == 6
+    assert expected_run_count(full_cfg) == 48
+
+
+def test_remaining_families_smoke_materializes_expected_runs():
+    cfg = _load_yaml("study", "staged_smoke_remaining_families_a100_1gpu.yaml")
+    runs = materialize_study(cfg)
+
+    assert len(runs) == 6
+    assert cfg.study.family_order == ["pythia", "deberta_v3", "qwen"]
+    assert {run.training_regime for run in runs} == {"staged", "control_task_only"}
+    assert {run.layer_scheme for run in runs} == {"penultimate_only"}
+
+    students_by_family = {}
+    for run in runs:
+        students_by_family.setdefault(run.family, set()).add(run.student_key)
+
+    assert students_by_family == {
+        "pythia": {"pythia_410m"},
+        "deberta_v3": {"deberta_v3_xsmall"},
+        "qwen": {"qwen2_5_0_5b"},
+    }

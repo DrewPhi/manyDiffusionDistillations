@@ -24,6 +24,9 @@ params:
     model_name_or_path: ${family.student.model_name_or_path}
     model_revision: ${family.student.model_revision}
     trust_remote_code: ${family.student.trust_remote_code}
+    model_family: ${family.model_family}
+    model_config_name_or_path: null
+    model_config_overrides: {}
     init_from_scratch: ${family.student.init_from_scratch}
     penultimate_dim: ${family.student.penultimate_dim}
     penultimate_layer_spec: ${family.layer_paths.penultimate}
@@ -40,6 +43,7 @@ params:
     dataset_revision: null
     text_field: text
     tokenizer_name: ${family.tokenizer_name}
+    lm_objective: ${family.model_family}
     max_length: 1024
     token_budget: 5000000000
     train_example_offset: 0
@@ -83,6 +87,7 @@ params:
     global_batch_size: 512
     micro_batch_size: 8
     grad_accum_steps: 64
+    training_regime: staged
     max_steps: null
     eval_every_n_steps: 1000
     save_every_n_steps: 1000
@@ -92,6 +97,27 @@ params:
     train_history_every_n_steps: 10
     lm_loss_weight: 1.0
     student_init_checkpoint_path: null
+    staged_training:
+      enabled: true
+      phase1:
+        objective: alignment_only
+        min_steps: 500
+        max_steps: 5000
+        eval_every_n_steps: 100
+        early_stop_patience: 5
+        early_stop_min_delta: 1.0e-4
+      phase2:
+        objective: task_only_frozen
+        max_steps: 20000
+      phase3:
+        objective: task_only_unfrozen
+        max_steps: 5000
+      checkpoint_analysis:
+        enabled: true
+        phase1_snapshots: 5
+        phase2_snapshots: 10
+        phase3_snapshots: 5
+        include_phase_end: true
 
   optimizer:
     name: adamw
@@ -112,9 +138,6 @@ params:
   alignment:
     loss: mse
     mse_reduction: mean
-    lambda_align: 0.0
-    lambda_schedule: constant
-    lambda_ramp_steps: 0
     batch_size: 16
     eval_batch_size: 8
     sample_every_n_steps: 1
@@ -130,16 +153,20 @@ params:
   reporting:
     spreadsheet_name: distill_family_study_results
     include_columns:
+      - training_regime
       - teacher_model
       - student_model
       - seed
-      - lambda_align
+      - staged_training_enabled
       - lm_loss_weight
       - val_loss
       - val_perplexity
       - test_loss
       - test_perplexity
       - align_mse
+      - phase1_steps
+      - phase2_steps
+      - phase3_steps
       - run_dir
       - ckpt_path
       - train_history_csv_path
@@ -151,10 +178,6 @@ params:
       - ${family.student.model_name_or_path}
     seed:
       - 42
-    lambda_align:
-      - 0.0
-      - 0.5
-      - 1.0
     learning_rate:
       - 3.0e-4
     max_length:
@@ -186,11 +209,13 @@ stages:
               model_name_or_path: ${stage_pipeline.params.teacher.model_name_or_path}
               model_revision: ${stage_pipeline.params.teacher.model_revision}
               trust_remote_code: ${stage_pipeline.params.teacher.trust_remote_code}
+              model_family: ${family.model_family}
         data:
           dataset_name: ${stage_pipeline.params.data.dataset_name}
           dataset_config: ${stage_pipeline.params.data.dataset_config}
           dataset_path: ${stage_pipeline.params.data.dataset_path}
           tokenizer_name: ${stage_pipeline.params.data.tokenizer_name}
+          lm_objective: ${stage_pipeline.params.data.lm_objective}
           max_length: ${stage_pipeline.params.data.max_length}
           probe_n_samples: ${stage_pipeline.params.probe.size}
           probe_ids_path: ${stage_pipeline.params.probe.ids_path}
@@ -238,6 +263,9 @@ stages:
       student_model_name_or_path: ${stage_pipeline.params.student.model_name_or_path}
       student_model_revision: ${stage_pipeline.params.student.model_revision}
       student_trust_remote_code: ${family.student.trust_remote_code}
+      student_model_family: ${stage_pipeline.params.student.model_family}
+      student_model_config_name_or_path: ${stage_pipeline.params.student.model_config_name_or_path}
+      student_model_config_overrides: ${stage_pipeline.params.student.model_config_overrides}
       init_from_scratch: ${stage_pipeline.params.student.init_from_scratch}
       family_name: ${family.name}
       family_architecture: ${family.architecture}
@@ -276,7 +304,9 @@ stages:
       gradient_clip_norm: ${stage_pipeline.params.training.gradient_clip_norm}
       train_history_every_n_steps: ${stage_pipeline.params.training.train_history_every_n_steps}
       lm_loss_weight: ${stage_pipeline.params.training.lm_loss_weight}
+      training_regime: ${stage_pipeline.params.training.training_regime}
       student_init_checkpoint_path: ${stage_pipeline.params.training.student_init_checkpoint_path}
+      staged_training: ${stage_pipeline.params.training.staged_training}
 
       optimizer:
         name: ${stage_pipeline.params.optimizer.name}
@@ -297,9 +327,6 @@ stages:
       alignment:
         loss: ${stage_pipeline.params.alignment.loss}
         mse_reduction: ${stage_pipeline.params.alignment.mse_reduction}
-        lambda_align: ${stage_pipeline.params.alignment.lambda_align}
-        lambda_schedule: ${stage_pipeline.params.alignment.lambda_schedule}
-        lambda_ramp_steps: ${stage_pipeline.params.alignment.lambda_ramp_steps}
         batch_size: ${stage_pipeline.params.alignment.batch_size}
         sample_every_n_steps: ${stage_pipeline.params.alignment.sample_every_n_steps}
         probe_train_fraction: ${stage_pipeline.params.probe.train_fraction}
@@ -314,12 +341,11 @@ stages:
         phate_seed: ${stage_pipeline.params.seeds.phate_seed}
 
       sweep_tied_keys:
-        - [lambda_align, lm_loss_weight]
+        - [seed, lm_loss_weight]
       sweep:
         teacher_model: ${stage_pipeline.params.sweep.teacher_model}
         student_model: ${stage_pipeline.params.sweep.student_model}
         seed: ${stage_pipeline.params.sweep.seed}
-        lambda_align: ${stage_pipeline.params.sweep.lambda_align}
         lm_loss_weight: ${stage_pipeline.params.sweep.lm_loss_weight}
         learning_rate: ${stage_pipeline.params.sweep.learning_rate}
         max_length: ${stage_pipeline.params.sweep.max_length}

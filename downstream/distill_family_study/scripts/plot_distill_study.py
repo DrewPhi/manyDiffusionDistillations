@@ -8,6 +8,7 @@ import json
 from pathlib import Path
 
 import matplotlib.pyplot as plt
+import numpy as np
 import pandas as pd
 
 
@@ -51,7 +52,7 @@ def _load_rows(input_dir: Path) -> pd.DataFrame:
 
 
 def _family_order(df: pd.DataFrame) -> list[str]:
-    preferred = ["pythia", "qwen", "t5"]
+    preferred = ["pythia", "qwen", "bert", "deberta_v3"]
     present = [family for family in preferred if family in set(df["family"])]
     extras = sorted(set(df["family"]) - set(preferred))
     return present + extras
@@ -65,8 +66,8 @@ def _student_order(df: pd.DataFrame, family: str) -> list[str]:
 def plot_tradeoff_by_family(df: pd.DataFrame, outdir: Path) -> None:
     families = _family_order(df)
     fig, axes = plt.subplots(1, len(families), figsize=(6 * len(families), 5), squeeze=False)
-    lambda_colors = {0.0: "#1f77b4", 0.5: "#ff7f0e", 1.0: "#2ca02c"}
     scheme_markers = {"penultimate_only": "o", "second_plus_penultimate": "s", "custom": "D"}
+    scheme_colors = {"penultimate_only": "#1565c0", "second_plus_penultimate": "#c62828", "custom": "#6a1b9a"}
 
     for ax, family in zip(axes[0], families):
         subset = df[df["family"] == family].copy()
@@ -75,7 +76,7 @@ def plot_tradeoff_by_family(df: pd.DataFrame, outdir: Path) -> None:
                 row["align_mse"],
                 row["test_perplexity"],
                 s=120,
-                color=lambda_colors.get(float(row["lambda_align"]), "#444444"),
+                color=scheme_colors.get(str(row["layer_scheme"]), "#444444"),
                 marker=scheme_markers.get(str(row["layer_scheme"]), "x"),
                 alpha=0.9,
             )
@@ -83,53 +84,65 @@ def plot_tradeoff_by_family(df: pd.DataFrame, outdir: Path) -> None:
         ax.set_xlabel("Alignment MSE")
         ax.set_ylabel("Test Perplexity")
 
-    lambda_handles = [
-        plt.Line2D([0], [0], marker="o", color="w", markerfacecolor=color, markersize=9, label=f"lambda={lam}")
-        for lam, color in lambda_colors.items()
-    ]
     scheme_handles = [
-        plt.Line2D([0], [0], marker=marker, color="#555555", linestyle="", markersize=8, label=scheme)
-        for scheme, marker in scheme_markers.items()
+        plt.Line2D(
+            [0],
+            [0],
+            marker=scheme_markers.get(scheme, "x"),
+            color="w",
+            markerfacecolor=scheme_colors.get(scheme, "#444444"),
+            linestyle="",
+            markersize=8,
+            label=scheme,
+        )
+        for scheme in scheme_markers
     ]
-    fig.legend(handles=lambda_handles + scheme_handles, loc="upper center", ncol=5)
+    fig.legend(handles=scheme_handles, loc="upper center", ncol=3)
     fig.suptitle("Alignment vs Language Modeling Tradeoff by Family")
     fig.tight_layout(rect=(0, 0, 1, 0.92))
     fig.savefig(outdir / "tradeoff_by_family.png", dpi=180, bbox_inches="tight")
     plt.close(fig)
 
 
-def plot_lambda_ablation(df: pd.DataFrame, outdir: Path) -> None:
+def plot_staged_phase_steps(df: pd.DataFrame, outdir: Path) -> None:
+    if "training_regime" in df.columns:
+        df = df[df["training_regime"] == "staged"].copy()
+    if df.empty:
+        return
     families = _family_order(df)
     fig, axes = plt.subplots(len(families), 1, figsize=(12, 4 * len(families)), squeeze=False)
-    scheme_colors = {"penultimate_only": "#1565c0", "second_plus_penultimate": "#c62828"}
+    phase_columns = ["phase1_steps", "phase2_steps", "phase3_steps"]
+    phase_colors = {"phase1_steps": "#1565c0", "phase2_steps": "#2e7d32", "phase3_steps": "#ef6c00"}
 
     for ax, family in zip(axes[:, 0], families):
         subset = df[df["family"] == family].copy()
-        grouped = (
-            subset.groupby(["layer_scheme", "lambda_align"], as_index=False)["test_perplexity"]
-            .mean()
-            .sort_values(["layer_scheme", "lambda_align"])
-        )
-        for scheme, scheme_df in grouped.groupby("layer_scheme"):
-            ax.plot(
-                scheme_df["lambda_align"],
-                scheme_df["test_perplexity"],
-                marker="o",
-                linewidth=2,
-                color=scheme_colors.get(str(scheme), "#444444"),
-                label=str(scheme),
+        grouped = subset.groupby("layer_scheme", as_index=False)[phase_columns].mean()
+        x = np.arange(len(grouped))
+        width = 0.22
+        for idx, phase_column in enumerate(phase_columns):
+            ax.bar(
+                x + (idx - 1) * width,
+                grouped[phase_column],
+                width=width,
+                color=phase_colors[phase_column],
+                label=phase_column.replace("_steps", ""),
             )
-        ax.set_title(f"{family.capitalize()} Lambda Ablation")
-        ax.set_xlabel("lambda_align")
-        ax.set_ylabel("Mean Test Perplexity")
+        ax.set_xticks(x)
+        ax.set_xticklabels(grouped["layer_scheme"].tolist())
+        ax.set_title(f"{family.capitalize()} Staged Phase Steps")
+        ax.set_ylabel("Mean Steps")
         ax.legend(loc="best")
 
     fig.tight_layout()
-    fig.savefig(outdir / "lambda_ablation.png", dpi=180, bbox_inches="tight")
+    fig.savefig(outdir / "staged_phase_steps.png", dpi=180, bbox_inches="tight")
     plt.close(fig)
 
 
 def plot_layer_scheme_comparison(df: pd.DataFrame, outdir: Path) -> None:
+    if "training_regime" in df.columns:
+        df = df[df["training_regime"] == "staged"].copy()
+    if df.empty:
+        return
     rows = []
     for family in _family_order(df):
         family_df = df[df["family"] == family]
@@ -170,6 +183,10 @@ def plot_layer_scheme_comparison(df: pd.DataFrame, outdir: Path) -> None:
 
 
 def plot_scale_comparison(df: pd.DataFrame, outdir: Path) -> None:
+    if "training_regime" in df.columns:
+        df = df[df["training_regime"] == "staged"].copy()
+    if df.empty:
+        return
     best_rows = []
     for family in _family_order(df):
         family_df = df[df["family"] == family]
@@ -216,7 +233,7 @@ def write_summary(df: pd.DataFrame, outdir: Path) -> None:
         "families": families,
         "figures": [
             "tradeoff_by_family.png",
-            "lambda_ablation.png",
+            "staged_phase_steps.png",
             "layer_scheme_comparison.png",
             "scale_comparison.png",
         ],
@@ -230,7 +247,8 @@ def write_summary(df: pd.DataFrame, outdir: Path) -> None:
                 "family": family,
                 "student_model": best["student_model"],
                 "layer_scheme": best["layer_scheme"],
-                "lambda_align": float(best["lambda_align"]),
+                "training_regime": str(best.get("training_regime", "staged")),
+                "staged_training_enabled": bool(best.get("staged_training_enabled", False)),
                 "val_loss": float(best["val_loss"]),
                 "test_perplexity": float(best["test_perplexity"]),
                 "align_mse": float(best["align_mse"]),
@@ -247,7 +265,7 @@ def main() -> None:
     df = _load_rows(args.input_dir)
 
     plot_tradeoff_by_family(df, args.output_dir)
-    plot_lambda_ablation(df, args.output_dir)
+    plot_staged_phase_steps(df, args.output_dir)
     plot_layer_scheme_comparison(df, args.output_dir)
     plot_scale_comparison(df, args.output_dir)
     write_summary(df, args.output_dir)

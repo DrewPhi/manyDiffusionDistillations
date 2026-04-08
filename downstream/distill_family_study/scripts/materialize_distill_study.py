@@ -2,8 +2,8 @@
 """Materialize a declarative distillation study into canonical run manifests.
 
 This is the bridge between the publication study config and the eventual
-launcher. It expands families, students, layer schemes, lambdas, and seeds into
-one row per run plus the Hydra overrides needed to execute that run.
+launcher. It expands families, students, layer schemes, and seeds into one row
+per run plus the Hydra overrides needed to execute that run.
 """
 
 from __future__ import annotations
@@ -24,11 +24,6 @@ def _to_plain(value: Any) -> Any:
     return value
 
 
-def _slugify_lambda(value: float) -> str:
-    text = f"{value:.3f}".rstrip("0").rstrip(".")
-    return text.replace(".", "p")
-
-
 def _json_override(value: Any) -> str:
     return json.dumps(value, separators=(",", ":"))
 
@@ -39,6 +34,16 @@ def _scalar_override(value: Any) -> str:
     if isinstance(value, bool):
         return str(value).lower()
     return str(value)
+
+
+def _default_model_family(family_name: str, family_cfg: dict[str, Any]) -> str:
+    explicit = family_cfg.get("model_family")
+    if explicit is not None:
+        return str(explicit)
+    architecture = str(family_cfg.get("architecture", "")).lower()
+    if architecture == "seq2seq_lm" or architecture == "encoder_decoder" or family_name.lower() == "t5":
+        return "seq2seq_lm"
+    return "causal_lm"
 
 
 def _compute_total_steps(shared: dict[str, Any]) -> int | None:
@@ -85,9 +90,12 @@ class StudyRun:
     student_trust_remote_code: bool
     student_init_from_scratch: bool
     student_penultimate_dim: int
+    student_model_config_name_or_path: Optional[str]
+    student_model_config_overrides: Optional[dict[str, Any]]
     tokenizer_name: str
     layer_scheme: str
-    lambda_align: float
+    training_regime: str
+    staged_training_enabled: bool
     lm_loss_weight: float
     seed: int
     token_budget: Optional[int]
@@ -112,9 +120,12 @@ class StudyRun:
             "student_trust_remote_code": self.student_trust_remote_code,
             "student_init_from_scratch": self.student_init_from_scratch,
             "student_penultimate_dim": self.student_penultimate_dim,
+            "student_model_config_name_or_path": self.student_model_config_name_or_path,
+            "student_model_config_overrides": self.student_model_config_overrides,
             "tokenizer_name": self.tokenizer_name,
             "layer_scheme": self.layer_scheme,
-            "lambda_align": self.lambda_align,
+            "training_regime": self.training_regime,
+            "staged_training_enabled": self.staged_training_enabled,
             "lm_loss_weight": self.lm_loss_weight,
             "seed": self.seed,
             "token_budget": self.token_budget,
@@ -133,7 +144,7 @@ def _build_run(
     shared: dict[str, Any],
     student_cfg: dict[str, Any],
     layer_scheme: str,
-    lambda_align: float,
+    training_regime: str,
     seed: int,
 ) -> StudyRun:
     lm_loss_weight = float(shared["lm_loss_weight"])
@@ -143,32 +154,16 @@ def _build_run(
     train_example_offset = int(shared["train_example_offset"])
     probe_size = _resolve_probe_size(shared, student_cfg)
     total_steps = _compute_total_steps(shared)
-    scheduled_lambda_values = {float(v) for v in shared["alignment"].get("scheduled_lambda_values", [])}
-    if float(lambda_align) in scheduled_lambda_values:
-        lambda_schedule = str(shared["alignment"].get("scheduled_lambda_schedule", shared["alignment"]["lambda_schedule"]))
-        if "scheduled_lambda_ramp_fraction" in shared["alignment"]:
-            if total_steps is None:
-                raise ValueError(
-                    "Study config uses scheduled_lambda_ramp_fraction but does not provide "
-                    "a resolvable total step count. Set training.max_steps explicitly when "
-                    "token_budget is null."
-                )
-            lambda_ramp_fraction = float(shared["alignment"]["scheduled_lambda_ramp_fraction"])
-            lambda_ramp_steps = max(1, int(round(total_steps * lambda_ramp_fraction)))
-        else:
-            lambda_ramp_fraction = None
-            lambda_ramp_steps = int(shared["alignment"].get("scheduled_lambda_ramp_steps", shared["alignment"]["lambda_ramp_steps"]))
-    else:
-        lambda_schedule = str(shared["alignment"]["lambda_schedule"])
-        lambda_ramp_fraction = None
-        lambda_ramp_steps = int(shared["alignment"]["lambda_ramp_steps"])
-    lambda_slug = _slugify_lambda(lambda_align)
+    model_family = _default_model_family(family_name, family_cfg)
+    staged_training = dict(shared["training"].get("staged_training") or {})
+    runtime_staged_training_enabled = bool(staged_training.get("enabled", True))
+    staged_training_enabled = runtime_staged_training_enabled and training_regime == "staged"
     run_name = (
         f"{study_name}_"
         f"{family_name}_"
         f"{student_cfg['key']}_"
         f"{layer_scheme}_"
-        f"lambda{lambda_slug}_"
+        f"{training_regime}_"
         f"seed{seed}"
     )
 
@@ -187,9 +182,11 @@ def _build_run(
         f"stage_pipeline.params.student.model_name_or_path={student_cfg['model_name_or_path']}",
         f"stage_pipeline.params.student.model_revision={student_cfg['model_revision']}",
         f"stage_pipeline.params.student.trust_remote_code={_scalar_override(student_cfg['trust_remote_code'])}",
+        f"stage_pipeline.params.student.model_family={model_family}",
         f"stage_pipeline.params.student.init_from_scratch={_scalar_override(student_cfg['init_from_scratch'])}",
         f"stage_pipeline.params.student.penultimate_dim={student_cfg['penultimate_dim']}",
         f"stage_pipeline.params.data.tokenizer_name={student_cfg['tokenizer_name']}",
+        f"stage_pipeline.params.data.lm_objective={model_family}",
         f"stage_pipeline.params.data.max_length={max_length}",
         f"stage_pipeline.params.data.token_budget={_scalar_override(token_budget)}",
         f"stage_pipeline.params.data.train_example_offset={train_example_offset}",
@@ -216,6 +213,8 @@ def _build_run(
         f"stage_pipeline.params.training.gradient_clip_norm={shared['training']['gradient_clip_norm']}",
         f"stage_pipeline.params.training.train_history_every_n_steps={shared['training']['train_history_every_n_steps']}",
         f"stage_pipeline.params.training.lm_loss_weight={lm_loss_weight}",
+        f"stage_pipeline.params.training.training_regime={training_regime}",
+        f"stage_pipeline.params.training.staged_training.enabled={_scalar_override(runtime_staged_training_enabled)}",
         f"stage_pipeline.params.optimizer.name={shared['optimizer']['name']}",
         f"stage_pipeline.params.optimizer.learning_rate={shared['optimizer']['learning_rate']}",
         f"stage_pipeline.params.optimizer.betas={_json_override(shared['optimizer']['betas'])}",
@@ -228,8 +227,6 @@ def _build_run(
         f"stage_pipeline.params.regularization.label_smoothing={shared['regularization']['label_smoothing']}",
         f"stage_pipeline.params.alignment.loss={shared['alignment']['loss']}",
         f"stage_pipeline.params.alignment.mse_reduction={shared['alignment']['mse_reduction']}",
-        f"stage_pipeline.params.alignment.lambda_schedule={lambda_schedule}",
-        f"stage_pipeline.params.alignment.lambda_ramp_steps={lambda_ramp_steps}",
         f"stage_pipeline.params.alignment.batch_size={shared['alignment']['batch_size']}",
         f"stage_pipeline.params.alignment.eval_batch_size={shared['alignment']['eval_batch_size']}",
         f"stage_pipeline.params.alignment.sample_every_n_steps={shared['alignment']['sample_every_n_steps']}",
@@ -241,13 +238,49 @@ def _build_run(
         f"stage_pipeline.params.sweep.teacher_model={_json_override([family_cfg['teacher']['model_name_or_path']])}",
         f"stage_pipeline.params.sweep.student_model={_json_override([student_cfg['model_name_or_path']])}",
         f"stage_pipeline.params.sweep.seed={_json_override([seed])}",
-        f"stage_pipeline.params.sweep.lambda_align={_json_override([lambda_align])}",
         f"stage_pipeline.params.sweep.lm_loss_weight={_json_override([lm_loss_weight])}",
         f"stage_pipeline.params.sweep.learning_rate={_json_override([shared['optimizer']['learning_rate']])}",
         f"stage_pipeline.params.sweep.max_length={_json_override([max_length])}",
         f"stage_pipeline.params.sweep.token_budget={_json_override([token_budget])}",
         f"stage_pipeline.params.sweep.train_example_offset={_json_override([train_example_offset])}",
     ]
+
+    phase1_cfg = dict(staged_training.get("phase1") or {})
+    phase2_cfg = dict(staged_training.get("phase2") or {})
+    phase3_cfg = dict(staged_training.get("phase3") or {})
+    checkpoint_analysis_cfg = dict(staged_training.get("checkpoint_analysis") or {})
+    hydra_overrides.extend(
+        [
+            f"stage_pipeline.params.training.staged_training.phase1.objective={_scalar_override(phase1_cfg.get('objective'))}",
+            f"stage_pipeline.params.training.staged_training.phase1.min_steps={_scalar_override(phase1_cfg.get('min_steps'))}",
+            f"stage_pipeline.params.training.staged_training.phase1.max_steps={_scalar_override(phase1_cfg.get('max_steps'))}",
+            f"stage_pipeline.params.training.staged_training.phase1.eval_every_n_steps={_scalar_override(phase1_cfg.get('eval_every_n_steps'))}",
+            f"stage_pipeline.params.training.staged_training.phase1.early_stop_patience={_scalar_override(phase1_cfg.get('early_stop_patience'))}",
+            f"stage_pipeline.params.training.staged_training.phase1.early_stop_min_delta={_scalar_override(phase1_cfg.get('early_stop_min_delta'))}",
+            f"stage_pipeline.params.training.staged_training.phase2.objective={_scalar_override(phase2_cfg.get('objective'))}",
+            f"stage_pipeline.params.training.staged_training.phase2.max_steps={_scalar_override(phase2_cfg.get('max_steps'))}",
+            f"stage_pipeline.params.training.staged_training.phase3.objective={_scalar_override(phase3_cfg.get('objective'))}",
+            f"stage_pipeline.params.training.staged_training.phase3.max_steps={_scalar_override(phase3_cfg.get('max_steps'))}",
+            f"stage_pipeline.params.training.staged_training.checkpoint_analysis.enabled={_scalar_override(checkpoint_analysis_cfg.get('enabled'))}",
+            f"stage_pipeline.params.training.staged_training.checkpoint_analysis.phase1_snapshots={_scalar_override(checkpoint_analysis_cfg.get('phase1_snapshots'))}",
+            f"stage_pipeline.params.training.staged_training.checkpoint_analysis.phase2_snapshots={_scalar_override(checkpoint_analysis_cfg.get('phase2_snapshots'))}",
+            f"stage_pipeline.params.training.staged_training.checkpoint_analysis.phase3_snapshots={_scalar_override(checkpoint_analysis_cfg.get('phase3_snapshots'))}",
+            f"stage_pipeline.params.training.staged_training.checkpoint_analysis.include_phase_end={_scalar_override(checkpoint_analysis_cfg.get('include_phase_end'))}",
+        ]
+    )
+
+    model_config_name_or_path = student_cfg.get("model_config_name_or_path")
+    if model_config_name_or_path is not None:
+        hydra_overrides.append(
+            "stage_pipeline.params.student.model_config_name_or_path="
+            f"{_scalar_override(model_config_name_or_path)}"
+        )
+
+    for key, value in (student_cfg.get("model_config_overrides") or {}).items():
+        hydra_overrides.append(
+            "+stage_pipeline.params.student.model_config_overrides."
+            f"{key}={_scalar_override(value)}"
+        )
 
     reproducibility = {
         "experiment": "distill_family_study_template",
@@ -265,10 +298,13 @@ def _build_run(
             "trust_remote_code": bool(student_cfg["trust_remote_code"]),
             "init_from_scratch": bool(student_cfg["init_from_scratch"]),
             "penultimate_dim": int(student_cfg["penultimate_dim"]),
+            "model_config_name_or_path": model_config_name_or_path,
+            "model_config_overrides": dict(student_cfg.get("model_config_overrides") or {}),
             "tokenizer_name": student_cfg["tokenizer_name"],
         },
         "layer_scheme": layer_scheme,
-        "lambda_align": float(lambda_align),
+        "training_regime": training_regime,
+        "staged_training_enabled": staged_training_enabled,
         "lm_loss_weight": float(lm_loss_weight),
         "seed": int(seed),
         "output_dir": shared["output_dir"],
@@ -305,9 +341,6 @@ def _build_run(
         "alignment": {
             "loss": shared["alignment"]["loss"],
             "mse_reduction": shared["alignment"]["mse_reduction"],
-            "lambda_schedule": lambda_schedule,
-            "lambda_ramp_steps": lambda_ramp_steps,
-            "lambda_ramp_fraction": lambda_ramp_fraction,
             "batch_size": int(shared["alignment"]["batch_size"]),
             "eval_batch_size": int(shared["alignment"]["eval_batch_size"]),
             "sample_every_n_steps": int(shared["alignment"]["sample_every_n_steps"]),
@@ -329,9 +362,12 @@ def _build_run(
         student_trust_remote_code=bool(student_cfg["trust_remote_code"]),
         student_init_from_scratch=bool(student_cfg["init_from_scratch"]),
         student_penultimate_dim=int(student_cfg["penultimate_dim"]),
+        student_model_config_name_or_path=model_config_name_or_path,
+        student_model_config_overrides=dict(student_cfg.get("model_config_overrides") or {}) or None,
         tokenizer_name=student_cfg["tokenizer_name"],
         layer_scheme=layer_scheme,
-        lambda_align=float(lambda_align),
+        training_regime=training_regime,
+        staged_training_enabled=staged_training_enabled,
         lm_loss_weight=lm_loss_weight,
         seed=int(seed),
         token_budget=token_budget,
@@ -345,12 +381,13 @@ def _build_run(
 
 def materialize_study(cfg: DictConfig) -> list[StudyRun]:
     study = _to_plain(cfg.study)
+    training_regimes = list(study.get("training_regimes") or ["staged"])
     runs: list[StudyRun] = []
     for family_name in study["family_order"]:
         family_cfg = study["families"][family_name]
         for student_cfg in family_cfg["students"]:
             for layer_scheme in study["layer_schemes"]:
-                for lambda_align in study["shared"]["alignment"]["lambda_values"]:
+                for training_regime in training_regimes:
                     for seed in study["seeds"]:
                         runs.append(
                             _build_run(
@@ -360,11 +397,22 @@ def materialize_study(cfg: DictConfig) -> list[StudyRun]:
                                 shared=study["shared"],
                                 student_cfg=student_cfg,
                                 layer_scheme=layer_scheme,
-                                lambda_align=lambda_align,
+                                training_regime=str(training_regime),
                                 seed=seed,
                             )
                         )
     return runs
+
+
+def expected_run_count(cfg: DictConfig) -> int:
+    training_regimes = list(cfg.study.get("training_regimes") or ["staged"])
+    total_students = sum(len(cfg.study.families[family].students) for family in cfg.study.family_order)
+    return (
+        total_students
+        * len(cfg.study.layer_schemes)
+        * len(training_regimes)
+        * len(cfg.study.seeds)
+    )
 
 
 def write_outputs(runs: list[StudyRun], output_json: Path, output_csv: Path) -> None:
@@ -383,9 +431,12 @@ def write_outputs(runs: list[StudyRun], output_json: Path, output_csv: Path) -> 
         "student_key",
         "student_model",
         "student_penultimate_dim",
+        "student_model_config_name_or_path",
+        "student_model_config_overrides",
         "tokenizer_name",
         "layer_scheme",
-        "lambda_align",
+        "training_regime",
+        "staged_training_enabled",
         "lm_loss_weight",
         "seed",
         "token_budget",
@@ -432,13 +483,7 @@ def main() -> None:
     args = parse_args()
     cfg = OmegaConf.load(args.study_config)
     runs = materialize_study(cfg)
-    total_students = sum(len(cfg.study.families[family].students) for family in cfg.study.family_order)
-    expected_runs = (
-        total_students
-        * len(cfg.study.layer_schemes)
-        * len(cfg.study.shared.alignment.lambda_values)
-        * len(cfg.study.seeds)
-    )
+    expected_runs = expected_run_count(cfg)
     if len(runs) != expected_runs:
         raise ValueError(f"Expected {expected_runs} runs, materialized {len(runs)}")
     write_outputs(runs, output_json=args.output_json, output_csv=args.output_csv)

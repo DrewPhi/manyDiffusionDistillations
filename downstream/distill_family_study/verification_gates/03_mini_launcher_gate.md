@@ -1,28 +1,25 @@
 # 03 Mini Launcher Gate
 
-Before a large launch, the real launcher path should be exercised on a small study slice.
+Before a large launch, the real launcher path should be exercised on the one-GPU smoke wrapper.
 
-Current intended mini slice:
+Current mini gate:
 
-- families:
-  - `pythia`
-  - `qwen`
-  - `t5`
-- one student per family
-- one layer scheme
-- two lambda values
-- `6` runs total
+- study config: `downstream/distill_family_study/configs/study/staged_smoke_a100_1gpu.yaml`
+- expected run count: `2`
+- regimes:
+  - `staged`
+  - `control_task_only`
 
 Pass condition:
 
-- the top-level mini-launch wrapper runs
-- child jobs are submitted from the real launcher path
-- at least one child run reaches real training, not just setup
-- ideally the full 6-run batch finishes and writes the mini validation report
-- aggregation and plotting either pass or any failure is clearly downstream of runtime scale rather than config wiring
+- the wrapper submits both smoke runs
+- the staged run reaches Phase 1 training
+- the control run reaches task-only training
+- at least one analysis checkpoint is queued for each regime
+- the launcher path works without manual patching between runs
 
 Evidence sources:
 
-- `results/mini_launch_validation/*/report/mini_validation_report.json`
-- `results/mini_launch_validation/*/manifest/submission_manifest.json`
-- actual pipeline outputs under `outputs/pipelines/within_family_publication_*`
+- `results/study_manifests/staged_smoke_a100_1gpu/`
+- actual pipeline outputs under `outputs/pipelines/staged_smoke_a100_1gpu_*`
+- SLURM logs for the smoke wrapper

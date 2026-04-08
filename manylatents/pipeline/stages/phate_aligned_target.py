@@ -6,11 +6,18 @@ import re
 from pathlib import Path
 from typing import Any, Dict, List, Sequence, Tuple
 
+import matplotlib.pyplot as plt
 import numpy as np
 import torch
 
 from manylatents.algorithms.latent.phate import PHATEModule
 from manylatents.pipeline.stages.base import PipelineStage, StageContext, StageResult
+
+try:
+    import wandb
+    wandb.init
+except (ImportError, AttributeError):
+    wandb = None
 
 
 class PHATEAlignedTargetStage(PipelineStage):
@@ -211,6 +218,32 @@ class PHATEAlignedTargetStage(PipelineStage):
         target_np = target.detach().cpu().numpy() if torch.is_tensor(target) else np.asarray(target)
         return self._to_2d(target_np)
 
+    @staticmethod
+    def _plot_coords(coords: np.ndarray, output_path: Path, title: str) -> None:
+        fig, ax = plt.subplots(figsize=(5, 5))
+        ax.scatter(coords[:, 0], coords[:, 1], s=12, alpha=0.8)
+        ax.set_title(title)
+        ax.set_xlabel("PHATE-1")
+        ax.set_ylabel("PHATE-2")
+        fig.tight_layout()
+        fig.savefig(output_path, dpi=160, bbox_inches="tight")
+        plt.close(fig)
+
+    @staticmethod
+    def _wandb_log_teacher_phate(layer_name: str, coords: np.ndarray, image_path: Path) -> None:
+        if wandb is None or wandb.run is None:
+            return
+        safe = layer_name.replace(".", "_").replace("[", "_").replace("]", "_")
+        table = wandb.Table(columns=["probe_index", "x", "y", "layer"])
+        for idx, (x, y) in enumerate(coords):
+            table.add_data(int(idx), float(x), float(y), str(layer_name))
+        wandb.log(
+            {
+                f"teacher_phate/{safe}/table": table,
+                f"teacher_phate/{safe}/image": wandb.Image(str(image_path)),
+            }
+        )
+
     def _procrustes_align(self, phate_target: np.ndarray, teacher_acts: np.ndarray) -> Tuple[np.ndarray, Dict[str, Any]]:
         n = min(phate_target.shape[0], teacher_acts.shape[0])
         if n < 2:
@@ -257,7 +290,13 @@ class PHATEAlignedTargetStage(PipelineStage):
         stage_output_dir.mkdir(parents=True, exist_ok=True)
 
         aligned_targets: List[str] = []
+        teacher_phate_targets: List[str] = []
+        teacher_phate_targets_2d: List[str] = []
+        teacher_phate_target_images_2d: List[str] = []
         aligned_target_paths_by_layer: Dict[str, str] = {}
+        teacher_phate_target_paths_by_layer: Dict[str, str] = {}
+        teacher_phate_target_paths_2d_by_layer: Dict[str, str] = {}
+        teacher_phate_target_image_paths_2d_by_layer: Dict[str, str] = {}
         aligned_target_layers: List[str] = []
         index_rows: List[Dict[str, Any]] = []
         first_teacher_acts = next(iter(teacher_acts_by_layer.values()))
@@ -269,9 +308,29 @@ class PHATEAlignedTargetStage(PipelineStage):
                 teacher_acts_by_layer=teacher_acts_by_layer,
             )
             phate_target = self._phate_target(diffusion_path)
+            phate_target_2d = phate_target[:, :2] if phate_target.shape[1] >= 2 else np.pad(
+                phate_target,
+                ((0, 0), (0, max(0, 2 - phate_target.shape[1]))),
+            )
             aligned_target, align_meta = self._procrustes_align(phate_target, teacher_acts)
 
             stem = diffusion_path.stem
+            phate_out_path = stage_output_dir / f"{stem}__teacher_phate_target.npy"
+            np.save(phate_out_path, phate_target.astype(np.float32))
+            teacher_phate_targets.append(str(phate_out_path))
+            teacher_phate_target_paths_by_layer[layer_name] = str(phate_out_path)
+
+            phate_2d_out_path = stage_output_dir / f"{stem}__teacher_phate_target_2d.npy"
+            np.save(phate_2d_out_path, phate_target_2d.astype(np.float32))
+            teacher_phate_targets_2d.append(str(phate_2d_out_path))
+            teacher_phate_target_paths_2d_by_layer[layer_name] = str(phate_2d_out_path)
+
+            phate_2d_image_path = stage_output_dir / f"{stem}__teacher_phate_target_2d.png"
+            self._plot_coords(phate_target_2d, phate_2d_image_path, title=f"{layer_name} teacher PHATE")
+            teacher_phate_target_images_2d.append(str(phate_2d_image_path))
+            teacher_phate_target_image_paths_2d_by_layer[layer_name] = str(phate_2d_image_path)
+            self._wandb_log_teacher_phate(layer_name, phate_target_2d, phate_2d_image_path)
+
             out_path = stage_output_dir / f"{stem}{self.output_suffix}"
             np.save(out_path, aligned_target)
             aligned_targets.append(str(out_path))
@@ -282,9 +341,13 @@ class PHATEAlignedTargetStage(PipelineStage):
                 "source_diffusion_operator": str(diffusion_path),
                 "source_stage": self.source_stage,
                 "layer_name": layer_name,
+                "output_teacher_phate_target": str(phate_out_path),
+                "output_teacher_phate_target_2d": str(phate_2d_out_path),
+                "output_teacher_phate_target_2d_image": str(phate_2d_image_path),
                 "output_aligned_target": str(out_path),
                 "teacher_activation_shape": [int(v) for v in teacher_acts.shape],
                 "phate_target_shape": [int(v) for v in phate_target.shape],
+                "phate_target_2d_shape": [int(v) for v in phate_target_2d.shape],
                 "aligned_target_shape": [int(v) for v in aligned_target.shape],
                 "phate_params": self.phate_params,
                 "procrustes": align_meta,
@@ -296,6 +359,9 @@ class PHATEAlignedTargetStage(PipelineStage):
                 {
                     "source_diffusion_operator": str(diffusion_path),
                     "layer_name": layer_name,
+                    "output_teacher_phate_target": str(phate_out_path),
+                    "output_teacher_phate_target_2d": str(phate_2d_out_path),
+                    "output_teacher_phate_target_2d_image": str(phate_2d_image_path),
                     "output_aligned_target": str(out_path),
                     "meta": str(meta_path),
                 }
@@ -320,6 +386,12 @@ class PHATEAlignedTargetStage(PipelineStage):
                 "aligned_probe_ids_path": str(aligned_probe_ids_path),
                 "aligned_target_layers": aligned_target_layers,
                 "aligned_target_paths_by_layer": aligned_target_paths_by_layer,
+                "teacher_phate_targets": teacher_phate_targets,
+                "teacher_phate_target_paths_by_layer": teacher_phate_target_paths_by_layer,
+                "teacher_phate_targets_2d": teacher_phate_targets_2d,
+                "teacher_phate_target_images_2d": teacher_phate_target_images_2d,
+                "teacher_phate_target_paths_2d_by_layer": teacher_phate_target_paths_2d_by_layer,
+                "teacher_phate_target_image_paths_2d_by_layer": teacher_phate_target_image_paths_2d_by_layer,
                 "aligned_target_path": aligned_target_path,
                 # Alias for compatibility with downstream stage configs expecting target lists
                 "phate_targets": aligned_targets,

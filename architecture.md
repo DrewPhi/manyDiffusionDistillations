@@ -2,7 +2,7 @@
 
 ## Purpose
 
-This repo contains the reusable `manylatents` framework plus a downstream experiment package for within-family PHATE-target distillation across Pythia, Qwen2.5, and T5.
+This repo contains the reusable `manylatents` framework plus a downstream experiment package for within-family PHATE-target distillation across Pythia, Qwen2.5, BERT, and DeBERTa-v3.
 
 The downstream experiment surface lives under:
 
@@ -18,6 +18,14 @@ The study is a four-stage pipeline:
 4. `sweep_results_sheet`
 
 That flow is executed by the stage-pipeline runner in core `manylatents`.
+
+Inside `distill_sweep_grid`, the active experiment is no longer a joint-loss lambda sweep. It is a staged single-run procedure:
+
+1. Phase 1: alignment-only
+2. Phase 2: aligned layers frozen, task-only training
+3. Phase 3: aligned layers unfrozen, task-only fine-tuning
+
+The active study configs keep the family, student, layer-scheme, and seed axes, but remove `lambda_align` from the study surface.
 
 ## Representation Contract
 
@@ -40,6 +48,34 @@ not:
 
 - the full `[seq_len, hidden_dim]` tokenwise activation tensor
 - the diffusion operator itself
+
+## Training And Analysis Contract
+
+The student-training stage now has two responsibilities:
+
+1. train the student with staged optimization
+2. emit detached analysis checkpoints and a queue manifest for geometry analysis
+
+The training process logs scalar metrics locally and to W&B:
+
+- train LM loss
+- train alignment loss
+- total loss
+- validation loss
+- validation perplexity
+- held-out alignment MSE
+- per-layer held-out alignment MSE
+- phase transitions
+
+The training process also writes:
+
+- regular checkpoints for recovery and model selection
+- `student_analysis_step{N}.pt` checkpoints for geometry analysis
+- `analysis_queue.jsonl` and `analysis_index.json` for detached analysis
+
+Geometry analysis is intentionally detached from the optimizer loop. A separate worker processes saved analysis checkpoints, extracts student activations on the fixed probe set, builds diffusion operators, computes PHATE 2D embeddings, writes those artifacts locally, and logs PHATE outputs to W&B.
+
+This separation is important because checkpoint-driven analysis is retriable and does not block the main training loop.
 
 When teacher activation dimensionality does not match the PHATE target dimensionality, teacher activations may be PCA-reduced inside the Procrustes step only so the alignment is well-defined. The saved target remains the aligned PHATE coordinate system.
 
@@ -90,7 +126,8 @@ Family registry:
 
 - `downstream/distill_family_study/configs/family/pythia.yaml`
 - `downstream/distill_family_study/configs/family/qwen.yaml`
-- `downstream/distill_family_study/configs/family/t5.yaml`
+- `downstream/distill_family_study/configs/family/bert.yaml`
+- `downstream/distill_family_study/configs/family/deberta_v3.yaml`
 
 Layer schemes:
 
@@ -122,6 +159,10 @@ Run one materialized spec:
 - `downstream/distill_family_study/scripts/run_materialized_distill_run.py`
 - `downstream/distill_family_study/scripts/run_distill_family_study_single.sbatch`
 
+Process detached checkpoint analysis:
+
+- `downstream/distill_family_study/scripts/process_analysis_queue.py`
+
 Mini launcher validation:
 
 - `downstream/distill_family_study/scripts/run_submit_distill_study_mini_validation.py`
@@ -134,6 +175,14 @@ The intended verification entrypoints are:
 - `downstream/distill_family_study/verification_gates/`
 - `FINAL_TESTS.md`
 - `downstream/distill_family_study/scripts/consolidate_distill_handoff.py`
+
+The minimum publishable verification bar for the staged study is:
+
+- manifest materialization is correct for all 4 families
+- staged phase boundaries and freeze behavior are correct
+- scalar metrics are written locally and to W&B
+- detached analysis checkpoints are emitted at the configured cadence
+- the analysis worker can consume queued checkpoints and write PHATE outputs
 
 The consolidation script is the sanity-check layer that reads actual result JSON files and emits a compact status summary. It exists so a reviewer does not need to trust narrative notes.
 

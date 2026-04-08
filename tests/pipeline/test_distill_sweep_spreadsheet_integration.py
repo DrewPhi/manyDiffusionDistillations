@@ -46,7 +46,7 @@ def test_distill_sweep_to_spreadsheet_smoke_2x2(monkeypatch, tmp_path):
         },
     )
 
-    def _fake_run_single(self, combo, aligned_targets, expected_probe_ids, run_output_dir):
+    def _fake_run_single(self, combo, aligned_targets, expected_probe_ids, run_output_dir, combo_idx):
         return {
             "teacher_model": combo["teacher_model_name_or_path"],
             "student_model": combo["student_model_name_or_path"],

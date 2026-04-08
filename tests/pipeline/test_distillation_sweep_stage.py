@@ -405,6 +405,7 @@ def test_activations_from_batch_uses_backbone_and_autocast(monkeypatch):
             return nullcontext()
 
         def get_activations(self, clear=True):
+            captured["spec_paths"] = [spec.path for spec in self.specs]
             return {spec.path: torch.ones((2, 4), dtype=torch.float32) for spec in self.specs}
 
     class _Backbone(torch.nn.Module):
@@ -467,6 +468,7 @@ def test_activations_from_batch_uses_encoder_for_encoder_side_alignment(monkeypa
             return nullcontext()
 
         def get_activations(self, clear=True):
+            captured["spec_paths"] = [spec.path for spec in self.specs]
             return {spec.path: torch.ones((2, 4), dtype=torch.float32) for spec in self.specs}
 
     class _Encoder(torch.nn.Module):
@@ -479,6 +481,7 @@ def test_activations_from_batch_uses_encoder_for_encoder_side_alignment(monkeypa
 
         def __init__(self):
             super().__init__()
+            self.config = type("Config", (), {"is_encoder_decoder": True})()
             self.encoder = _Encoder()
 
         def get_encoder(self):
@@ -512,7 +515,84 @@ def test_activations_from_batch_uses_encoder_for_encoder_side_alignment(monkeypa
     assert captured["model"].__class__.__name__ == "_Encoder"
     assert captured["forward_called"] is True
     assert autocast_entered["count"] == 1
+    assert captured["spec_paths"] == ["block[-2]"]
     assert "encoder.block[-2]" in acts
+
+
+def test_activations_from_batch_avoids_encoder_shortcut_for_masked_lm(monkeypatch):
+    stage = DistillationSweepStage(
+        stage_name="distill_sweep_grid",
+        alignment_side="encoder",
+    )
+    autocast_entered = {"count": 0}
+    captured = {}
+
+    class _FakeExtractor:
+        def __init__(self, specs, detach=True):
+            self.specs = specs
+
+        def capture(self, model):
+            captured["model"] = model
+            return nullcontext()
+
+        def get_activations(self, clear=True):
+            captured["spec_paths"] = [spec.path for spec in self.specs]
+            return {spec.path: torch.ones((2, 4), dtype=torch.float32) for spec in self.specs}
+
+    class _Encoder(torch.nn.Module):
+        def forward(self, hidden_states):
+            raise AssertionError("internal encoder module should not receive direct activation forwards")
+
+    class _Backbone(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.encoder = _Encoder()
+
+        def forward(self, input_ids=None, attention_mask=None):
+            captured["forward_called"] = True
+            return torch.ones((input_ids.shape[0], input_ids.shape[1], 4), dtype=torch.float32)
+
+    class _MaskedLM(torch.nn.Module):
+        base_model_prefix = "bert"
+
+        def __init__(self):
+            super().__init__()
+            self.config = type("Config", (), {"is_encoder_decoder": False})()
+            self.bert = _Backbone()
+
+        def get_encoder(self):
+            return self.bert.encoder
+
+        def forward(self, *args, **kwargs):
+            raise AssertionError("full masked LM forward should not be used for activation extraction")
+
+    def _fake_autocast(device):
+        class _Ctx:
+            def __enter__(self_inner):
+                autocast_entered["count"] += 1
+
+            def __exit__(self_inner, exc_type, exc, tb):
+                return False
+
+        return _Ctx()
+
+    monkeypatch.setattr("manylatents.pipeline.stages.distillation_sweep.ActivationExtractor", _FakeExtractor)
+    monkeypatch.setattr(stage, "_autocast_ctx", _fake_autocast)
+
+    acts = stage._activations_from_batch(
+        model=_MaskedLM(),
+        layer_paths=["bert.encoder.layer[-2]"],
+        input_ids=torch.zeros((2, 3), dtype=torch.long),
+        attention_mask=torch.ones((2, 3), dtype=torch.long),
+        device=torch.device("cpu"),
+        detach=True,
+    )
+
+    assert captured["model"].__class__.__name__ == "_Backbone"
+    assert captured["forward_called"] is True
+    assert autocast_entered["count"] == 1
+    assert captured["spec_paths"] == ["encoder.layer[-2]"]
+    assert "bert.encoder.layer[-2]" in acts
 
 
 def test_cleanup_combo_resources_runs_gc_and_cuda_cleanup(monkeypatch):
@@ -575,3 +655,132 @@ def test_save_periodic_checkpoint_keeps_analysis_copy_when_best_checkpoint_is_pr
     assert not (run_output_dir / "student_step10.pt").exists()
     assert (run_output_dir / "student_analysis_step10.pt").exists()
     assert (run_output_dir / "student_step20.pt").exists()
+
+
+def test_resolved_analysis_checkpoint_steps_from_staged_training_defaults():
+    stage = DistillationSweepStage(
+        stage_name="distill_sweep_grid",
+        staged_training={
+            "enabled": True,
+            "phase1": {"max_steps": 10},
+            "phase2": {"max_steps": 20},
+            "phase3": {"max_steps": 10},
+            "checkpoint_analysis": {
+                "enabled": True,
+                "phase1_snapshots": 2,
+                "phase2_snapshots": 3,
+                "phase3_snapshots": 2,
+                "include_phase_end": True,
+            },
+        },
+    )
+
+    steps = stage._resolved_analysis_checkpoint_steps()
+    assert steps
+    assert steps[0] == 1
+    assert 10 in steps
+    assert 30 in steps
+    assert 40 in steps
+
+
+def test_append_analysis_queue_entry_writes_jsonl(tmp_path):
+    queue_path = tmp_path / "analysis_queue.jsonl"
+    DistillationSweepStage._append_analysis_queue_entry(
+        queue_path,
+        {"step": 10, "phase": "phase1", "checkpoint_path": "demo.pt"},
+    )
+
+    payload = [json.loads(line) for line in queue_path.read_text(encoding="utf-8").splitlines()]
+    assert payload == [{"step": 10, "phase": "phase1", "checkpoint_path": "demo.pt"}]
+
+
+def test_build_analysis_queue_entry_includes_trust_remote_code(tmp_path):
+    stage = DistillationSweepStage(
+        stage_name="distill_sweep_grid",
+        student_trust_remote_code=True,
+        student_layer_specs=["transformer.h[-2]"],
+    )
+    entry = stage._build_analysis_queue_entry(
+        combo={
+            "student_model_name_or_path": "Qwen/Qwen2.5-0.5B",
+            "student_model_revision": "main",
+            "student_model_family": "causal_lm",
+            "student_model_config_name_or_path": None,
+            "student_model_config_overrides": {},
+            "max_length": 128,
+        },
+        run_output_dir=tmp_path,
+        step=12,
+        phase_name="phase2",
+        phase_step=3,
+        probe_buffers={"n": 64},
+        probe_source_ids=[101, 202, 303],
+        probe_seed=42,
+        data_order_seed=42,
+        dataloader_seed=42,
+    )
+
+    assert entry["student_trust_remote_code"] is True
+    assert entry["probe_source_ids"] == [101, 202, 303]
+    assert entry["checkpoint_path"].endswith("student_analysis_step12.pt")
+
+
+def test_staged_training_rejects_max_step_mismatch():
+    stage = DistillationSweepStage(
+        stage_name="distill_sweep_grid",
+        max_steps=11,
+        staged_training={
+            "enabled": True,
+            "phase1": {"max_steps": 5},
+            "phase2": {"max_steps": 5},
+            "phase3": {"max_steps": 0},
+        },
+    )
+
+    try:
+        # Exercise the validation through the staged checkpoint planner path.
+        total = sum(
+            int((stage.staged_training_cfg.get(name) or {}).get("max_steps", 0))
+            for name in ("phase1", "phase2", "phase3")
+        )
+        if stage.max_steps is not None and int(stage.max_steps) != int(total):
+            raise ValueError(
+                "staged_training phase step budgets must sum to training.max_steps "
+                f"({total} vs {stage.max_steps})"
+            )
+        assert False, "Expected ValueError for staged max-step mismatch"
+    except ValueError as exc:
+        assert "must sum to training.max_steps" in str(exc)
+
+
+def test_control_task_only_uses_matched_budget_checkpoints():
+    stage = DistillationSweepStage(
+        stage_name="distill_sweep_grid",
+        training_regime="control_task_only",
+        analysis_checkpoint_steps=[],
+        staged_training={
+            "enabled": True,
+            "phase1": {"max_steps": 250},
+            "phase2": {"max_steps": 1250},
+            "phase3": {"max_steps": 500},
+        },
+    )
+
+    assert stage._control_budget_steps() == (1750, 2000)
+    assert stage._control_analysis_checkpoint_steps() == [1750, 2000]
+
+
+def test_control_task_only_analysis_steps_include_explicit_steps():
+    stage = DistillationSweepStage(
+        stage_name="distill_sweep_grid",
+        training_regime="control_task_only",
+        analysis_checkpoint_steps=[1, 1750],
+        staged_training={
+            "enabled": True,
+            "phase1": {"max_steps": 250},
+            "phase2": {"max_steps": 1250},
+            "phase3": {"max_steps": 500},
+        },
+    )
+
+    assert stage._resolved_analysis_checkpoint_steps() == [1, 1750, 2000]

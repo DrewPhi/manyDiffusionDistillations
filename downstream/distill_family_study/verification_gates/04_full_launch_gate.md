@@ -1,23 +1,34 @@
 # 04 Full Launch Gate
 
-The large-cluster launch is acceptable when the following are true:
+The full launch is acceptable when all of the following are true:
 
-- family smokes passed
-- manifest dry run passed
-- mini launcher validation shows real end-to-end progress
-- no new family-specific logic bug appears
-- the intended study config is explicit
+- targeted pytest passed
+- the manifest gate passed
+- the smoke wrapper exercised both regimes
+- no new regime-specific or family-specific bug appeared in the smoke
+- the intended study config is explicit and documented
 
-For the full-dataset run, also require:
+For the full-Pile run, also require:
 
-- the stopping rule is explicit
-- the continuation policy is explicit
-- the operator knows whether the study is:
-  - bounded-token
-  - full-dataset
+- study config:
+  - `downstream/distill_family_study/configs/study/within_family_full_pile.yaml`
+- stopping rule:
+  - one epoch-equivalent via explicit `training.max_steps`
+- continuation policy:
+  - resume from saved student weights if needed, not exact optimizer-state resume
 
-Current full-dataset policy:
+Full-Pile expected shape:
 
-- study config: `downstream/distill_family_study/configs/study/within_family_full_pile.yaml`
-- stopping rule: one epoch-equivalent via explicit `training.max_steps`
-- continuation: resume from saved student weights, not exact optimizer-state resume
+- `48` runs total
+- `24` staged
+- `24` control
+- four families
+- two layer schemes
+
+Submission command:
+
+```bash
+python downstream/distill_family_study/scripts/submit_distill_study.py \
+  --study-config downstream/distill_family_study/configs/study/within_family_full_pile.yaml \
+  --submit
+```

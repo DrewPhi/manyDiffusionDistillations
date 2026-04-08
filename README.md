@@ -92,6 +92,25 @@ result2 = run(input_data=result["embeddings"], algorithms={"latent": "phate"})
 
 ---
 
+## current study
+
+This repo also contains an active downstream research package for staged within-family PHATE-target distillation across:
+
+- Pythia
+- Qwen2.5
+- BERT
+- DeBERTa-v3
+
+That study lives under [`downstream/distill_family_study/`](/home/mila/d/drewd/codeReview/manyDiffusionDistillations/downstream/distill_family_study) and uses the core `manylatents` pipeline runner plus reusable probe, diffusion, PHATE, and HF-training components.
+
+Key references:
+
+- [`architecture.md`](/home/mila/d/drewd/codeReview/manyDiffusionDistillations/architecture.md)
+- [`Revamp.md`](/home/mila/d/drewd/codeReview/manyDiffusionDistillations/Revamp.md)
+- [`downstream/distill_family_study/README.md`](/home/mila/d/drewd/codeReview/manyDiffusionDistillations/downstream/distill_family_study/README.md)
+
+---
+
 ## architecture
 
 ```

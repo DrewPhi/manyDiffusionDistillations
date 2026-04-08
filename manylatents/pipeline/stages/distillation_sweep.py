@@ -36,7 +36,7 @@ from manylatents.pipeline.stages.base import PipelineStage, StageContext, StageR
 class DistillationSweepStage(PipelineStage):
     """Run Cartesian sweeps for student distillation with LM + alignment loss."""
 
-    RESULT_SCHEMA_VERSION = "distill_sweep_row_v2"
+    RESULT_SCHEMA_VERSION = "distill_sweep_row_v4"
 
     @staticmethod
     def _wandb_log(metrics: Dict[str, float], step: int | None = None) -> None:
@@ -78,6 +78,9 @@ class DistillationSweepStage(PipelineStage):
         student_model_name_or_path: str = "EleutherAI/pythia-70m",
         student_model_revision: str | None = None,
         student_trust_remote_code: bool = False,
+        student_model_family: str = "causal_lm",
+        student_model_config_name_or_path: str | None = None,
+        student_model_config_overrides: Dict[str, Any] | None = None,
         init_from_scratch: bool = True,
         family_name: str | None = None,
         family_architecture: str | None = None,
@@ -118,11 +121,13 @@ class DistillationSweepStage(PipelineStage):
         lr_scheduler: Dict[str, Any] | None = None,
         regularization: Dict[str, Any] | None = None,
         alignment: Dict[str, Any] | None = None,
+        staged_training: Dict[str, Any] | None = None,
         seeds: Dict[str, int] | None = None,
         sweep: Dict[str, Sequence[Any]] | None = None,
         sweep_tied_keys: Sequence[Sequence[str] | str] | None = None,
         eval_max_batches: int = 100,
         lm_loss_weight: float = 1.0,
+        training_regime: str = "staged",
         student_init_checkpoint_path: str | None = None,
     ):
         super().__init__(stage_name=stage_name)
@@ -141,6 +146,9 @@ class DistillationSweepStage(PipelineStage):
         self.student_model_name_or_path = student_model_name_or_path
         self.student_model_revision = student_model_revision
         self.student_trust_remote_code = bool(student_trust_remote_code)
+        self.student_model_family = str(student_model_family)
+        self.student_model_config_name_or_path = student_model_config_name_or_path
+        self.student_model_config_overrides = dict(student_model_config_overrides or {})
         self.init_from_scratch = init_from_scratch
         self.family_name = family_name
         self.family_architecture = family_architecture
@@ -223,6 +231,34 @@ class DistillationSweepStage(PipelineStage):
             "probe_eval_fraction": 0.2,
             "mse_reduction": "mean",
         }
+        self.staged_training_cfg = {
+            "enabled": False,
+            "phase1": {
+                "objective": "alignment_only",
+                "min_steps": 0,
+                "max_steps": 0,
+                "eval_every_n_steps": 0,
+                "early_stop_patience": 0,
+                "early_stop_min_delta": 0.0,
+            },
+            "phase2": {"objective": "task_only_frozen", "max_steps": 0},
+            "phase3": {"objective": "task_only_unfrozen", "max_steps": 0},
+            "checkpoint_analysis": {
+                "enabled": False,
+                "phase1_snapshots": 0,
+                "phase2_snapshots": 0,
+                "phase3_snapshots": 0,
+                "include_phase_end": True,
+            },
+        }
+        if staged_training:
+            for key, value in staged_training.items():
+                if isinstance(value, dict) and isinstance(self.staged_training_cfg.get(key), dict):
+                    merged = dict(self.staged_training_cfg[key])
+                    merged.update(value)
+                    self.staged_training_cfg[key] = merged
+                else:
+                    self.staged_training_cfg[key] = value
         self.seeds = seeds or {"global_seed": 42}
         self.sweep = sweep or {}
         self.sweep_tied_keys = [
@@ -231,6 +267,7 @@ class DistillationSweepStage(PipelineStage):
         ]
         self.eval_max_batches = eval_max_batches
         self.lm_loss_weight = float(lm_loss_weight)
+        self.training_regime = str(training_regime)
         self.student_init_checkpoint_path = student_init_checkpoint_path
 
     def _resolve_stage_seed(self, key: str, combo_seed: int) -> int:
@@ -327,6 +364,14 @@ class DistillationSweepStage(PipelineStage):
             "teacher_model_revision": combo.get("teacher_model_revision", self.teacher_model_revision),
             "student_model_name_or_path": combo.get("student_model", self.student_model_name_or_path),
             "student_model_revision": combo.get("student_model_revision", self.student_model_revision),
+            "student_model_family": combo.get("student_model_family", self.student_model_family),
+            "student_model_config_name_or_path": combo.get(
+                "student_model_config_name_or_path",
+                self.student_model_config_name_or_path,
+            ),
+            "student_model_config_overrides": dict(
+                combo.get("student_model_config_overrides", self.student_model_config_overrides) or {}
+            ),
             "seed": int(combo.get("seed", self.seeds.get("global_seed", 42))),
             "lambda_align": float(combo.get("lambda_align", self.alignment_cfg.get("lambda_align", 0.0))),
             "learning_rate": float(combo.get("learning_rate", self.optimizer_cfg.get("learning_rate", 3e-4))),
@@ -622,6 +667,298 @@ class DistillationSweepStage(PipelineStage):
             if path_to_remove.exists():
                 path_to_remove.unlink()
 
+    @staticmethod
+    def _save_analysis_checkpoint(
+        *,
+        model: torch.nn.Module,
+        run_output_dir: Path,
+        step: int,
+    ) -> Path:
+        analysis_ckpt_step_path = run_output_dir / f"student_analysis_step{step}.pt"
+        torch.save(model.state_dict(), analysis_ckpt_step_path)
+        return analysis_ckpt_step_path
+
+    @staticmethod
+    def _path_segments(path: str) -> List[tuple[str, List[int]]]:
+        segments: List[tuple[str, List[int]]] = []
+        for part in str(path).split("."):
+            if not part:
+                continue
+            name = ""
+            indices: List[int] = []
+            cursor = 0
+            while cursor < len(part):
+                if part[cursor] == "[":
+                    end = part.index("]", cursor)
+                    indices.append(int(part[cursor + 1:end]))
+                    cursor = end + 1
+                    continue
+                name += part[cursor]
+                cursor += 1
+            segments.append((name, indices))
+        return segments
+
+    @classmethod
+    def _resolve_module_by_path(cls, root: torch.nn.Module, path: str) -> torch.nn.Module:
+        current: Any = root
+        for name, indices in cls._path_segments(path):
+            if name:
+                current = getattr(current, name)
+            for index in indices:
+                current = current[index]
+        if not isinstance(current, torch.nn.Module):
+            raise TypeError(f"Resolved path '{path}' is not a torch.nn.Module")
+        return current
+
+    @staticmethod
+    def _set_module_trainable(module: torch.nn.Module, trainable: bool) -> None:
+        for param in module.parameters():
+            param.requires_grad = trainable
+
+    def _freeze_aligned_layers(self, model: torch.nn.Module) -> List[str]:
+        forward_model = self._activation_forward_model(model, alignment_side=self.alignment_side)
+        frozen_paths: List[str] = []
+        for layer_path in self.student_layer_specs:
+            normalized_path = self._normalize_layer_path_for_model(
+                forward_model=forward_model,
+                original_model=model,
+                layer_path=layer_path,
+                alignment_side=self.alignment_side,
+            )
+            module = self._resolve_module_by_path(forward_model, normalized_path)
+            self._set_module_trainable(module, False)
+            frozen_paths.append(layer_path)
+        return frozen_paths
+
+    @staticmethod
+    def _unfreeze_all_layers(model: torch.nn.Module) -> None:
+        for param in model.parameters():
+            param.requires_grad = True
+
+    def _build_optimizer_for_trainable_params(
+        self,
+        model: torch.nn.Module,
+        *,
+        learning_rate: float,
+    ) -> AdamW:
+        params = [param for param in model.parameters() if param.requires_grad]
+        if not params:
+            raise ValueError("No trainable parameters remain after applying freeze policy")
+        return AdamW(
+            params,
+            lr=float(learning_rate),
+            betas=tuple(self.optimizer_cfg.get("betas", [0.9, 0.95])),
+            eps=float(self.optimizer_cfg.get("eps", 1e-8)),
+            weight_decay=float(self.optimizer_cfg.get("weight_decay", 0.0)),
+        )
+
+    def _staged_training_enabled(self) -> bool:
+        return bool(self.staged_training_cfg.get("enabled", False))
+
+    def _is_control_task_only(self) -> bool:
+        return str(self.training_regime).lower() == "control_task_only"
+
+    def _control_budget_steps(self) -> tuple[int, int]:
+        phase1_steps = max(0, int((self.staged_training_cfg.get("phase1") or {}).get("max_steps", 0)))
+        phase2_steps = max(0, int((self.staged_training_cfg.get("phase2") or {}).get("max_steps", 0)))
+        phase3_steps = max(0, int((self.staged_training_cfg.get("phase3") or {}).get("max_steps", 0)))
+        return phase2_steps + phase3_steps, phase1_steps + phase2_steps + phase3_steps
+
+    def _control_analysis_checkpoint_steps(self) -> List[int]:
+        phase23_budget_steps, full_budget_steps = self._control_budget_steps()
+        explicit_steps = list(self.analysis_checkpoint_steps)
+        return sorted(
+            {
+                int(step)
+                for step in [*explicit_steps, phase23_budget_steps, full_budget_steps]
+                if int(step) > 0
+            }
+        )
+
+    def _analysis_steps_for_phase(
+        self,
+        *,
+        phase_start_step: int,
+        phase_steps: int,
+        snapshot_count: int,
+        include_phase_end: bool,
+    ) -> List[int]:
+        if phase_steps <= 0 or snapshot_count <= 0:
+            return []
+        end_step = phase_start_step + phase_steps - 1
+        if snapshot_count == 1:
+            return [end_step] if include_phase_end else [phase_start_step]
+        raw = np.linspace(phase_start_step, end_step, num=snapshot_count, endpoint=True)
+        steps = sorted({int(round(value)) for value in raw})
+        if include_phase_end:
+            steps.append(end_step)
+        return sorted({step for step in steps if phase_start_step <= step <= end_step})
+
+    def _resolved_analysis_checkpoint_steps(self) -> List[int]:
+        if self._is_control_task_only():
+            return self._control_analysis_checkpoint_steps()
+        if self.analysis_checkpoint_steps:
+            return list(self.analysis_checkpoint_steps)
+        if not self._staged_training_enabled():
+            return []
+        checkpoint_cfg = dict(self.staged_training_cfg.get("checkpoint_analysis") or {})
+        if not checkpoint_cfg.get("enabled", False):
+            return []
+        include_phase_end = bool(checkpoint_cfg.get("include_phase_end", True))
+        phase_specs = [
+            ("phase1", int((self.staged_training_cfg.get("phase1") or {}).get("max_steps", 0)), int(checkpoint_cfg.get("phase1_snapshots", 0))),
+            ("phase2", int((self.staged_training_cfg.get("phase2") or {}).get("max_steps", 0)), int(checkpoint_cfg.get("phase2_snapshots", 0))),
+            ("phase3", int((self.staged_training_cfg.get("phase3") or {}).get("max_steps", 0)), int(checkpoint_cfg.get("phase3_snapshots", 0))),
+        ]
+        out: List[int] = []
+        cursor = 1
+        for _phase_name, phase_steps, snapshot_count in phase_specs:
+            out.extend(
+                self._analysis_steps_for_phase(
+                    phase_start_step=cursor,
+                    phase_steps=phase_steps,
+                    snapshot_count=snapshot_count,
+                    include_phase_end=include_phase_end,
+                )
+            )
+            cursor += max(0, phase_steps)
+        return sorted({int(step) for step in out if int(step) > 0})
+
+    def _record_train_row(
+        self,
+        rows: List[Dict[str, float | str | bool]],
+        *,
+        global_step: int,
+        phase_name: str,
+        phase_step: int,
+        train_lm_loss: float,
+        train_align_loss: float,
+        train_total_loss: float,
+        learning_rate: float,
+        aligned_layers_frozen: bool,
+    ) -> None:
+        rows.append(
+            {
+                "global_step": float(global_step),
+                "phase": phase_name,
+                "phase_step": float(phase_step),
+                "train_lm_loss": float(train_lm_loss),
+                "train_align_loss": float(train_align_loss),
+                "train_total_loss": float(train_total_loss),
+                "learning_rate": float(learning_rate),
+                "aligned_layers_frozen": bool(aligned_layers_frozen),
+            }
+        )
+
+    def _record_eval_row(
+        self,
+        rows: List[Dict[str, float | str | bool]],
+        *,
+        global_step: int,
+        phase_name: str,
+        phase_step: int,
+        val_loss: float,
+        align_mse: float,
+        align_mse_per_layer: Dict[str, float],
+        aligned_layers_frozen: bool,
+    ) -> Dict[str, float | str | bool]:
+        row: Dict[str, float | str | bool] = {
+            "global_step": float(global_step),
+            "phase": phase_name,
+            "phase_step": float(phase_step),
+            "val_loss": float(val_loss),
+            "val_perplexity": float(self._safe_perplexity(val_loss)),
+            "align_mse": float(align_mse),
+            "aligned_layers_frozen": bool(aligned_layers_frozen),
+        }
+        for layer_name, value in align_mse_per_layer.items():
+            safe = self._sanitize_layer_name(layer_name)
+            row[f"align_mse__{safe}"] = float(value)
+        rows.append(row)
+        return row
+
+    def _wandb_log_phase_metrics(
+        self,
+        *,
+        combo_idx: int,
+        phase_name: str,
+        step: int,
+        metrics: Dict[str, float | bool | str],
+        kind: str,
+    ) -> None:
+        combo_prefix = f"distill_sweep/combo_{int(combo_idx):04d}"
+        payload: Dict[str, float | bool | str] = {}
+        for key, value in metrics.items():
+            payload[f"{combo_prefix}/{kind}/{phase_name}/{key}"] = value
+            payload[f"{combo_prefix}/{kind}/{key}"] = value
+        self._wandb_log(payload, step=step)
+
+    @staticmethod
+    def _analysis_queue_path(run_output_dir: Path) -> Path:
+        return run_output_dir / "analysis_queue.jsonl"
+
+    @staticmethod
+    def _append_analysis_queue_entry(queue_path: Path, entry: Dict[str, Any]) -> None:
+        queue_path.parent.mkdir(parents=True, exist_ok=True)
+        with queue_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(entry, sort_keys=True) + "\n")
+
+    def _build_analysis_queue_entry(
+        self,
+        *,
+        combo: Dict[str, Any],
+        run_output_dir: Path,
+        step: int,
+        phase_name: str,
+        phase_step: int,
+        probe_buffers: Dict[str, Any],
+        probe_source_ids: List[int],
+        probe_seed: int,
+        data_order_seed: int,
+        dataloader_seed: int,
+    ) -> Dict[str, Any]:
+        return {
+            "queue_schema_version": "student_analysis_queue_v1",
+            "run_dir": str(run_output_dir),
+            "checkpoint_path": str(run_output_dir / f"student_analysis_step{int(step)}.pt"),
+            "step": int(step),
+            "phase": phase_name,
+            "phase_step": int(phase_step),
+            "family": self.family_name or "unknown",
+            "student_model": combo["student_model_name_or_path"],
+            "student_model_revision": combo["student_model_revision"],
+            "student_trust_remote_code": bool(self.student_trust_remote_code),
+            "student_model_family": combo["student_model_family"],
+            "student_model_config_name_or_path": combo["student_model_config_name_or_path"],
+            "student_model_config_overrides": dict(combo["student_model_config_overrides"]),
+            "tokenizer_name": self.tokenizer_name or combo["student_model_name_or_path"],
+            "precision": self.precision,
+            "micro_batch_size": int(self.micro_batch_size),
+            "dataset_name": self.dataset_name,
+            "dataset_config": self.dataset_config,
+            "dataset_path": self.dataset_path,
+            "dataset_revision": self.dataset_revision,
+            "text_field": self.text_field,
+            "train_split": self.train_split,
+            "val_split": self.val_split,
+            "test_split": self.test_split,
+            "probe_split": self.probe_split,
+            "probe_ids_path": self.probe_ids_path,
+            "exclude_probe_from_train": bool(self.exclude_probe_from_train),
+            "max_length": int(combo["max_length"]),
+            "probe_n_samples": int(probe_buffers["n"]),
+            "probe_source_ids": [int(v) for v in probe_source_ids],
+            "probe_seed": int(probe_seed),
+            "data_order_seed": int(data_order_seed),
+            "dataloader_seed": int(dataloader_seed),
+            "student_layer_specs": list(self.student_layer_specs),
+            "alignment_side": self.alignment_side,
+            "wandb_parent_run_id": getattr(getattr(wandb, "run", None), "id", None) if wandb is not None else None,
+            "wandb_parent_run_name": getattr(getattr(wandb, "run", None), "name", None) if wandb is not None else None,
+            "wandb_project": getattr(getattr(wandb, "run", None), "project", None) if wandb is not None else None,
+            "wandb_entity": getattr(getattr(wandb, "run", None), "entity", None) if wandb is not None else None,
+        }
+
     def _precision_to_dtype(self) -> torch.dtype | None:
         p = str(self.precision).lower()
         if p in {"bf16", "bfloat16"}:
@@ -671,7 +1008,13 @@ class DistillationSweepStage(PipelineStage):
         model: torch.nn.Module,
         alignment_side: str | None = None,
     ) -> torch.nn.Module:
-        if str(alignment_side).lower() == "encoder" and hasattr(model, "get_encoder"):
+        model_config = getattr(model, "config", None)
+        is_encoder_decoder = bool(getattr(model_config, "is_encoder_decoder", False))
+        if (
+            str(alignment_side).lower() == "encoder"
+            and is_encoder_decoder
+            and hasattr(model, "get_encoder")
+        ):
             encoder = model.get_encoder()
             if isinstance(encoder, torch.nn.Module):
                 return encoder
@@ -712,7 +1055,12 @@ class DistillationSweepStage(PipelineStage):
             suffix = normalized[len("transformer.layers"):]
             return f"layers{suffix}"
         if str(alignment_side).lower() == "encoder" and normalized.startswith("encoder."):
-            return normalized[len("encoder."):]
+            model_config = getattr(original_model, "config", None)
+            is_encoder_decoder = bool(getattr(model_config, "is_encoder_decoder", False))
+            if is_encoder_decoder and hasattr(original_model, "get_encoder"):
+                encoder = original_model.get_encoder()
+                if forward_model is encoder:
+                    return normalized[len("encoder."):]
         if normalized.startswith("transformer."):
             return normalized[len("transformer."):]
         if normalized.startswith("model."):
@@ -874,7 +1222,7 @@ class DistillationSweepStage(PipelineStage):
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
-    def _run_single_combo(
+    def _run_single_combo_legacy(
         self,
         combo: Dict[str, Any],
         aligned_targets: Dict[str, np.ndarray],
@@ -928,6 +1276,7 @@ class DistillationSweepStage(PipelineStage):
                 val_example_limit=eval_example_limit,
                 test_example_limit=eval_example_limit,
                 text_field=self.text_field,
+                lm_objective=combo["student_model_family"],
                 tokenizer_name=self.tokenizer_name or combo["student_model_name_or_path"],
                 max_length=int(combo["max_length"]),
                 batch_size=int(self.micro_batch_size),
@@ -944,18 +1293,24 @@ class DistillationSweepStage(PipelineStage):
             )
             train_loader = dm.train_dataloader()
 
-            hf_cfg = HFTrainerConfig(
-                model_name_or_path=combo["student_model_name_or_path"],
-                model_revision=combo["student_model_revision"],
-                init_mode="from_config" if self.init_from_scratch else "pretrained",
-                model_config_name_or_path=combo["student_model_name_or_path"],
-                model_config_overrides={
+            model_config_overrides = dict(combo["student_model_config_overrides"])
+            model_config_overrides.update(
+                {
                     "hidden_dropout": float(self.regularization_cfg.get("dropout", 0.0)),
                     "attention_dropout": float(self.regularization_cfg.get("dropout", 0.0)),
                     "resid_pdrop": float(self.regularization_cfg.get("dropout", 0.0)),
                     "embd_pdrop": float(self.regularization_cfg.get("dropout", 0.0)),
                     "attn_pdrop": float(self.regularization_cfg.get("dropout", 0.0)),
-                },
+                }
+            )
+            hf_cfg = HFTrainerConfig(
+                model_name_or_path=combo["student_model_name_or_path"],
+                model_revision=combo["student_model_revision"],
+                init_mode="from_config" if self.init_from_scratch else "pretrained",
+                model_config_name_or_path=(
+                    combo["student_model_config_name_or_path"] or combo["student_model_name_or_path"]
+                ),
+                model_config_overrides=model_config_overrides,
                 tokenizer_name=self.tokenizer_name or combo["student_model_name_or_path"],
                 tokenizer_revision=combo["student_model_revision"],
                 learning_rate=float(combo["learning_rate"]),
@@ -964,7 +1319,7 @@ class DistillationSweepStage(PipelineStage):
                 adam_epsilon=float(self.optimizer_cfg.get("eps", 1e-8)),
                 trust_remote_code=self.student_trust_remote_code,
                 torch_dtype=self._precision_to_dtype(),
-                model_family="seq2seq_lm" if str(self.family_architecture).lower() == "encoder_decoder" else "causal_lm",
+                model_family=combo["student_model_family"],
             )
             trainer_module = HFTrainerModule(hf_cfg)
             trainer_module.configure_model()
@@ -992,6 +1347,7 @@ class DistillationSweepStage(PipelineStage):
             )
 
             probe_buffers = self._make_probe_buffers(dm, aligned_targets=aligned_targets_for_run)
+            probe_source_ids_for_analysis = self._probe_ids_from_datamodule(dm)[: int(probe_buffers["n"])]
             split = self._split_probe_indices(probe_buffers["n"], seed=probe_seed)
             probe_train_idx = split["train"]
             probe_eval_idx = split["eval"]
@@ -1316,6 +1672,694 @@ class DistillationSweepStage(PipelineStage):
                     f"{combo_prefix}/lm_loss_weight": float(combo["lm_loss_weight"]),
                 },
                 step=int(steps),
+            )
+            return row
+        finally:
+            self._cleanup_combo_resources(
+                trainer_module=trainer_module,
+                model=model,
+                optimizer=optimizer,
+                dm=dm,
+                probe_buffers=probe_buffers,
+                aligned_targets_for_run=aligned_targets_for_run,
+                train_loader=train_loader,
+                train_iter=train_iter,
+            )
+
+    def _run_single_combo(
+        self,
+        combo: Dict[str, Any],
+        aligned_targets: Dict[str, np.ndarray],
+        expected_probe_ids: List[int],
+        run_output_dir: Path,
+        combo_idx: int,
+    ) -> Dict[str, Any]:
+        if not self._staged_training_enabled() and not self._is_control_task_only():
+            return self._run_single_combo_legacy(
+                combo=combo,
+                aligned_targets=aligned_targets,
+                expected_probe_ids=expected_probe_ids,
+                run_output_dir=run_output_dir,
+                combo_idx=combo_idx,
+            )
+
+        run_output_dir.mkdir(parents=True, exist_ok=True)
+        combo_seed = int(combo["seed"])
+        model_init_seed = self._resolve_stage_seed("model_init_seed", combo_seed)
+        data_order_seed = self._resolve_stage_seed("data_order_seed", combo_seed)
+        dataloader_seed = self._resolve_stage_seed("dataloader_seed", combo_seed)
+        probe_seed = self._resolve_stage_seed("global_seed", combo_seed)
+        layer_pairs = self._resolve_layer_pairs()
+        layer_scheme_name = self._infer_layer_scheme_name(layer_pairs)
+        eval_example_limit = None
+        if int(self.eval_max_batches) > 0:
+            eval_example_limit = int(self.eval_max_batches) * int(self.micro_batch_size)
+
+        random.seed(model_init_seed)
+        torch.manual_seed(model_init_seed)
+        np.random.seed(model_init_seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(model_init_seed)
+            torch.backends.cudnn.deterministic = True
+            torch.backends.cudnn.benchmark = False
+
+        trainer_module: HFTrainerModule | None = None
+        model: torch.nn.Module | None = None
+        optimizer: AdamW | None = None
+        dm: TextDataModule | None = None
+        probe_buffers: Dict[str, Any] | None = None
+        aligned_targets_for_run: Dict[str, np.ndarray] | None = None
+        train_loader = None
+        train_iter = None
+
+        try:
+            dm = TextDataModule(
+                dataset_name=self.dataset_name,
+                dataset_config=self.dataset_config,
+                dataset_path=self.dataset_path,
+                dataset_revision=self.dataset_revision,
+                train_split=self.train_split,
+                val_split=self.val_split,
+                test_split=self.test_split,
+                probe_split=self.probe_split,
+                token_budget=combo["token_budget"],
+                train_example_offset=int(combo["train_example_offset"]),
+                probe_ids_path=self.probe_ids_path,
+                exclude_probe_from_train=self.exclude_probe_from_train,
+                val_example_limit=eval_example_limit,
+                test_example_limit=eval_example_limit,
+                text_field=self.text_field,
+                lm_objective=combo["student_model_family"],
+                tokenizer_name=self.tokenizer_name or combo["student_model_name_or_path"],
+                max_length=int(combo["max_length"]),
+                batch_size=int(self.micro_batch_size),
+                probe_n_samples=int(min(target.shape[0] for target in aligned_targets.values())),
+                seed=probe_seed,
+                data_order_seed=data_order_seed,
+                dataloader_seed=dataloader_seed,
+            )
+            dm.setup()
+            aligned_targets_for_run = self._materialize_targets_for_datamodule(
+                dm=dm,
+                aligned_targets=aligned_targets,
+                expected_probe_ids=expected_probe_ids,
+            )
+            train_loader = dm.train_dataloader()
+            train_iter = iter(train_loader)
+
+            model_config_overrides = dict(combo["student_model_config_overrides"])
+            model_config_overrides.update(
+                {
+                    "hidden_dropout": float(self.regularization_cfg.get("dropout", 0.0)),
+                    "attention_dropout": float(self.regularization_cfg.get("dropout", 0.0)),
+                    "resid_pdrop": float(self.regularization_cfg.get("dropout", 0.0)),
+                    "embd_pdrop": float(self.regularization_cfg.get("dropout", 0.0)),
+                    "attn_pdrop": float(self.regularization_cfg.get("dropout", 0.0)),
+                }
+            )
+            hf_cfg = HFTrainerConfig(
+                model_name_or_path=combo["student_model_name_or_path"],
+                model_revision=combo["student_model_revision"],
+                init_mode="from_config" if self.init_from_scratch else "pretrained",
+                model_config_name_or_path=(
+                    combo["student_model_config_name_or_path"] or combo["student_model_name_or_path"]
+                ),
+                model_config_overrides=model_config_overrides,
+                tokenizer_name=self.tokenizer_name or combo["student_model_name_or_path"],
+                tokenizer_revision=combo["student_model_revision"],
+                learning_rate=float(combo["learning_rate"]),
+                weight_decay=float(self.optimizer_cfg.get("weight_decay", 0.0)),
+                warmup_steps=int(self.lr_scheduler_cfg.get("warmup_steps", 0)),
+                adam_epsilon=float(self.optimizer_cfg.get("eps", 1e-8)),
+                trust_remote_code=self.student_trust_remote_code,
+                torch_dtype=self._precision_to_dtype(),
+                model_family=combo["student_model_family"],
+            )
+            trainer_module = HFTrainerModule(hf_cfg)
+            trainer_module.configure_model()
+            model = trainer_module.network
+            assert model is not None
+
+            init_ckpt_path = combo.get("student_init_checkpoint_path")
+            if isinstance(init_ckpt_path, str) and init_ckpt_path:
+                checkpoint_payload = torch.load(init_ckpt_path, map_location="cpu")
+                state_dict = checkpoint_payload["model_state_dict"] if isinstance(checkpoint_payload, dict) and "model_state_dict" in checkpoint_payload else checkpoint_payload
+                model.load_state_dict(state_dict)
+
+            device = self._select_device()
+            model = model.to(device)
+
+            probe_buffers = self._make_probe_buffers(dm, aligned_targets=aligned_targets_for_run)
+            probe_source_ids_for_analysis = self._probe_ids_from_datamodule(dm)[: int(probe_buffers["n"])]
+            split = self._split_probe_indices(probe_buffers["n"], seed=probe_seed)
+            probe_train_idx = split["train"]
+            probe_eval_idx = split["eval"]
+            rng = np.random.default_rng(probe_seed + 17)
+
+            phase1_cfg = dict(self.staged_training_cfg.get("phase1") or {})
+            phase2_cfg = dict(self.staged_training_cfg.get("phase2") or {})
+            phase3_cfg = dict(self.staged_training_cfg.get("phase3") or {})
+            control_phase23_budget_step: int | None = None
+            control_full_budget_step: int | None = None
+            control_phase23_analysis_checkpoint_path: str = ""
+            if self._is_control_task_only():
+                control_phase23_budget_step, control_full_budget_step = self._control_budget_steps()
+                phase_specs = [
+                    {
+                        "name": "control_task_only",
+                        "objective": "task_only_unfrozen",
+                        "steps": int(control_full_budget_step),
+                        "eval_every": int(self.eval_every_n_steps or 0),
+                        "min_steps": 0,
+                        "patience": 0,
+                        "min_delta": 0.0,
+                        "freeze_layers": False,
+                    }
+                ]
+            else:
+                phase_specs = [
+                    {
+                        "name": "phase1",
+                        "objective": str(phase1_cfg.get("objective", "alignment_only")),
+                        "steps": int(phase1_cfg.get("max_steps", 0)),
+                        "eval_every": int(phase1_cfg.get("eval_every_n_steps", self.eval_every_n_steps or 0)),
+                        "min_steps": int(phase1_cfg.get("min_steps", 0)),
+                        "patience": int(phase1_cfg.get("early_stop_patience", 0)),
+                        "min_delta": float(phase1_cfg.get("early_stop_min_delta", 0.0)),
+                        "freeze_layers": False,
+                    },
+                    {
+                        "name": "phase2",
+                        "objective": str(phase2_cfg.get("objective", "task_only_frozen")),
+                        "steps": int(phase2_cfg.get("max_steps", 0)),
+                        "eval_every": int(self.eval_every_n_steps or 0),
+                        "min_steps": 0,
+                        "patience": 0,
+                        "min_delta": 0.0,
+                        "freeze_layers": True,
+                    },
+                    {
+                        "name": "phase3",
+                        "objective": str(phase3_cfg.get("objective", "task_only_unfrozen")),
+                        "steps": int(phase3_cfg.get("max_steps", 0)),
+                        "eval_every": int(self.eval_every_n_steps or 0),
+                        "min_steps": 0,
+                        "patience": 0,
+                        "min_delta": 0.0,
+                        "freeze_layers": False,
+                    },
+                ]
+
+            total_planned_steps = sum(max(0, int(spec["steps"])) for spec in phase_specs)
+            if total_planned_steps <= 0:
+                raise ValueError("Staged training requires at least one positive phase step budget")
+            if self.max_steps is not None and int(self.max_steps) != int(total_planned_steps):
+                raise ValueError(
+                    "staged_training phase step budgets must sum to training.max_steps "
+                    f"({total_planned_steps} vs {self.max_steps})"
+                )
+            effective_batch = self._effective_global_batch_size()
+            analysis_steps = self._resolved_analysis_checkpoint_steps()
+            self.analysis_checkpoint_steps = analysis_steps
+            self.analysis_checkpoint_step_set = set(analysis_steps)
+            analysis_queue_path = self._analysis_queue_path(run_output_dir)
+            if analysis_queue_path.exists():
+                analysis_queue_path.unlink()
+            analysis_jobs: List[Dict[str, Any]] = []
+            enqueued_analysis_steps: set[int] = set()
+
+            lm_losses: List[float] = []
+            align_losses: List[float] = []
+            train_history_rows: List[Dict[str, float | str | bool]] = []
+            periodic_eval_rows: List[Dict[str, float | str | bool]] = []
+            best_checkpoints: List[tuple[float, Path]] = []
+            phase_steps_completed: Dict[str, int] = {"phase1": 0, "phase2": 0, "phase3": 0, "control_task_only": 0}
+            phase_stop_reasons: Dict[str, str] = {}
+            phase_best_align: Dict[str, float] = {}
+            global_step = 0
+            last_align_loss_per_layer: Dict[str, float] = {}
+
+            for phase_spec in phase_specs:
+                phase_name = str(phase_spec["name"])
+                phase_steps = int(phase_spec["steps"])
+                if phase_steps <= 0:
+                    phase_stop_reasons[phase_name] = "skipped"
+                    phase_best_align.setdefault(phase_name, float("nan"))
+                    continue
+
+                self._unfreeze_all_layers(model)
+                frozen_paths: List[str] = []
+                if bool(phase_spec["freeze_layers"]):
+                    frozen_paths = self._freeze_aligned_layers(model)
+                optimizer = self._build_optimizer_for_trainable_params(
+                    model=model,
+                    learning_rate=float(combo["learning_rate"]),
+                )
+                aligned_layers_frozen = bool(frozen_paths)
+                best_align_mse = float("inf")
+                no_improve_evals = 0
+                phase_stop_reason = "max_steps"
+
+                self._wandb_log_phase_metrics(
+                    combo_idx=combo_idx,
+                    phase_name=phase_name,
+                    step=global_step,
+                    metrics={
+                        "phase_start": 1.0,
+                        "aligned_layers_frozen": aligned_layers_frozen,
+                    },
+                    kind="phase_boundary",
+                )
+
+                for phase_step in range(1, phase_steps + 1):
+                    global_step += 1
+                    optimizer.zero_grad(set_to_none=True)
+                    self._update_lr(
+                        optimizer=optimizer,
+                        step=global_step,
+                        total_steps=total_planned_steps,
+                        base_lr=float(combo["learning_rate"]),
+                    )
+
+                    phase_objective = str(phase_spec["objective"])
+                    lm_loss_values: List[float] = []
+                    align_loss_values: List[float] = []
+                    current_align_loss_per_layer: Dict[str, float] = {}
+
+                    if phase_objective == "alignment_only":
+                        align_batch_size = int(self.alignment_cfg.get("batch_size", 16))
+                        mse_reduction = str(self.alignment_cfg.get("mse_reduction", "mean"))
+                        for _ in range(int(self.grad_accum_steps)):
+                            sampled_idx = rng.choice(
+                                probe_train_idx,
+                                size=min(align_batch_size, len(probe_train_idx)),
+                                replace=len(probe_train_idx) < align_batch_size,
+                            )
+                            probe_ids = probe_buffers["input_ids"][sampled_idx].to(device)
+                            probe_mask = probe_buffers["attention_mask"][sampled_idx].to(device)
+                            acts_by_layer = self._activations_from_batch(
+                                model=model,
+                                layer_paths=[pair["student_layer"] for pair in layer_pairs],
+                                input_ids=probe_ids,
+                                attention_mask=probe_mask,
+                                device=device,
+                                detach=False,
+                            )
+                            total_weight = 0.0
+                            weighted_loss = torch.tensor(0.0, device=device)
+                            for pair in layer_pairs:
+                                student_layer = str(pair["student_layer"])
+                                teacher_layer = str(pair["teacher_layer"])
+                                weight = float(pair["weight"])
+                                acts = acts_by_layer[student_layer]
+                                probe_targets = probe_buffers["targets"][teacher_layer][sampled_idx].to(device)
+                                acts, probe_targets = self._require_matching_alignment_width(
+                                    acts,
+                                    probe_targets,
+                                    student_layer=student_layer,
+                                    teacher_layer=teacher_layer,
+                                )
+                                layer_loss = F.mse_loss(
+                                    acts.float(),
+                                    probe_targets.float(),
+                                    reduction=mse_reduction,
+                                )
+                                current_align_loss_per_layer[student_layer] = float(layer_loss.detach().cpu().item())
+                                weighted_loss = weighted_loss + (weight * layer_loss)
+                                total_weight += weight
+                            if total_weight <= 0.0:
+                                raise ValueError("Sum of layer alignment weights must be positive")
+                            align_loss = weighted_loss / total_weight
+                            (align_loss / float(self.grad_accum_steps)).backward()
+                            align_loss_values.append(float(align_loss.detach().cpu().item()))
+                    else:
+                        for _ in range(int(self.grad_accum_steps)):
+                            try:
+                                batch = next(train_iter)
+                            except StopIteration:
+                                train_iter = iter(train_loader)
+                                batch = next(train_iter)
+                            batch = self._to_device(batch, device)
+                            with self._autocast_ctx(device):
+                                outputs = model(**batch)
+                                lm_loss = self._lm_loss(outputs, batch)
+                            lm_loss_weight = float(combo["lm_loss_weight"])
+                            if lm_loss_weight != 0.0:
+                                ((lm_loss * lm_loss_weight) / float(self.grad_accum_steps)).backward()
+                            lm_loss_values.append(float(lm_loss.detach().cpu().item()))
+
+                    if self.gradient_clip_norm and self.gradient_clip_norm > 0:
+                        torch.nn.utils.clip_grad_norm_(model.parameters(), self.gradient_clip_norm)
+                    optimizer.step()
+
+                    mean_lm_loss = float(np.mean(lm_loss_values)) if lm_loss_values else 0.0
+                    mean_align_loss = float(np.mean(align_loss_values)) if align_loss_values else 0.0
+                    total_loss_value = mean_align_loss if phase_objective == "alignment_only" else mean_lm_loss * float(combo["lm_loss_weight"])
+                    current_lr = float(optimizer.param_groups[0]["lr"])
+                    lm_losses.append(mean_lm_loss)
+                    align_losses.append(mean_align_loss)
+                    phase_steps_completed[phase_name] = phase_step
+                    if current_align_loss_per_layer:
+                        last_align_loss_per_layer = current_align_loss_per_layer
+
+                    if (
+                        int(self.train_history_every_n_steps) > 0
+                        and (phase_step % int(self.train_history_every_n_steps) == 0 or phase_step == 1 or phase_step == phase_steps)
+                    ):
+                        self._record_train_row(
+                            train_history_rows,
+                            global_step=global_step,
+                            phase_name=phase_name,
+                            phase_step=phase_step,
+                            train_lm_loss=mean_lm_loss,
+                            train_align_loss=mean_align_loss,
+                            train_total_loss=total_loss_value,
+                            learning_rate=current_lr,
+                            aligned_layers_frozen=aligned_layers_frozen,
+                        )
+                        self._wandb_log_phase_metrics(
+                            combo_idx=combo_idx,
+                            phase_name=phase_name,
+                            step=global_step,
+                            metrics={
+                                "global_step": float(global_step),
+                                "phase_step": float(phase_step),
+                                "train_lm_loss": mean_lm_loss,
+                                "train_align_loss": mean_align_loss,
+                                "train_total_loss": total_loss_value,
+                                "learning_rate": current_lr,
+                                "aligned_layers_frozen": aligned_layers_frozen,
+                            },
+                            kind="train",
+                        )
+
+                    eval_every = int(phase_spec["eval_every"])
+                    analysis_step_due = global_step in self.analysis_checkpoint_step_set
+                    should_eval = (
+                        analysis_step_due
+                        or (eval_every > 0 and (phase_step % eval_every == 0 or phase_step == phase_steps))
+                    )
+                    if should_eval:
+                        val_loss = self._eval_lm(model, dm.val_dataloader(), device=device)
+                        align_eval_mse, align_eval_per_layer = self._eval_alignment(
+                            model=model,
+                            device=device,
+                            probe_buffers=probe_buffers,
+                            eval_idx=probe_eval_idx,
+                            layer_pairs=layer_pairs,
+                        )
+                        model.train()
+                        eval_row = self._record_eval_row(
+                            periodic_eval_rows,
+                            global_step=global_step,
+                            phase_name=phase_name,
+                            phase_step=phase_step,
+                            val_loss=val_loss,
+                            align_mse=align_eval_mse,
+                            align_mse_per_layer=align_eval_per_layer,
+                            aligned_layers_frozen=aligned_layers_frozen,
+                        )
+                        self._wandb_log_phase_metrics(
+                            combo_idx=combo_idx,
+                            phase_name=phase_name,
+                            step=global_step,
+                            metrics=eval_row,
+                            kind="eval",
+                        )
+
+                        save_every = int(self.save_every_n_steps) if self.save_every_n_steps is not None else 0
+                        should_save_checkpoint = analysis_step_due or (
+                            save_every > 0 and (global_step % save_every == 0 or phase_step == phase_steps)
+                        )
+                        if should_save_checkpoint:
+                            self._save_periodic_checkpoint(
+                                model=model,
+                                run_output_dir=run_output_dir,
+                                step=global_step,
+                                eval_loss_for_rank=float(val_loss),
+                                best_checkpoints=best_checkpoints,
+                            )
+                            if analysis_step_due:
+                                analysis_ckpt_path = run_output_dir / f"student_analysis_step{int(global_step)}.pt"
+                                if analysis_ckpt_path.exists() and global_step not in enqueued_analysis_steps:
+                                    queue_entry = self._build_analysis_queue_entry(
+                                        combo=combo,
+                                        run_output_dir=run_output_dir,
+                                        step=global_step,
+                                        phase_name=phase_name,
+                                        phase_step=phase_step,
+                                        probe_buffers=probe_buffers,
+                                        probe_source_ids=probe_source_ids_for_analysis,
+                                        probe_seed=probe_seed,
+                                        data_order_seed=data_order_seed,
+                                        dataloader_seed=dataloader_seed,
+                                    )
+                                    self._append_analysis_queue_entry(analysis_queue_path, queue_entry)
+                                    analysis_jobs.append(queue_entry)
+                                    enqueued_analysis_steps.add(int(global_step))
+                                    if (
+                                        self._is_control_task_only()
+                                        and control_phase23_budget_step is not None
+                                        and int(global_step) == int(control_phase23_budget_step)
+                                    ):
+                                        control_phase23_analysis_checkpoint_path = str(analysis_ckpt_path)
+
+                        if phase_name == "phase1":
+                            best_align_mse = min(best_align_mse, float(align_eval_mse))
+                            min_steps = int(phase_spec["min_steps"])
+                            patience = int(phase_spec["patience"])
+                            min_delta = float(phase_spec["min_delta"])
+                            improved = float(align_eval_mse) < (phase_best_align.get(phase_name, float("inf")) - min_delta)
+                            if improved:
+                                phase_best_align[phase_name] = float(align_eval_mse)
+                                no_improve_evals = 0
+                            else:
+                                no_improve_evals += 1
+                            if phase_step >= min_steps and patience > 0 and no_improve_evals >= patience:
+                                phase_stop_reason = "align_plateau"
+                                break
+
+                phase_best_align.setdefault(phase_name, best_align_mse if math.isfinite(best_align_mse) else float("nan"))
+                phase_stop_reasons[phase_name] = phase_stop_reason
+                actual_phase_end_step = int(global_step)
+                if (
+                    bool((self.staged_training_cfg.get("checkpoint_analysis") or {}).get("enabled", False))
+                    and actual_phase_end_step > 0
+                    and actual_phase_end_step not in enqueued_analysis_steps
+                ):
+                    analysis_ckpt_path = self._save_analysis_checkpoint(
+                        model=model,
+                        run_output_dir=run_output_dir,
+                        step=actual_phase_end_step,
+                    )
+                    if analysis_ckpt_path.exists():
+                        queue_entry = self._build_analysis_queue_entry(
+                            combo=combo,
+                            run_output_dir=run_output_dir,
+                            step=actual_phase_end_step,
+                            phase_name=phase_name,
+                            phase_step=int(phase_steps_completed[phase_name]),
+                            probe_buffers=probe_buffers,
+                            probe_source_ids=probe_source_ids_for_analysis,
+                            probe_seed=probe_seed,
+                            data_order_seed=data_order_seed,
+                            dataloader_seed=dataloader_seed,
+                        )
+                        self._append_analysis_queue_entry(analysis_queue_path, queue_entry)
+                        analysis_jobs.append(queue_entry)
+                        enqueued_analysis_steps.add(actual_phase_end_step)
+                        if (
+                            self._is_control_task_only()
+                            and control_phase23_budget_step is not None
+                            and int(actual_phase_end_step) == int(control_phase23_budget_step)
+                        ):
+                            control_phase23_analysis_checkpoint_path = str(analysis_ckpt_path)
+                self._wandb_log_phase_metrics(
+                    combo_idx=combo_idx,
+                    phase_name=phase_name,
+                    step=global_step,
+                    metrics={
+                        "phase_end": 1.0,
+                        "phase_steps": float(phase_steps_completed[phase_name]),
+                        "phase_stop_reason": phase_stop_reasons[phase_name],
+                        "best_align_mse": float(phase_best_align[phase_name]),
+                    },
+                    kind="phase_boundary",
+                )
+
+            val_loss = self._eval_lm(model, dm.val_dataloader(), device=device)
+            val_ppl = self._safe_perplexity(val_loss)
+            test_loss = self._eval_lm(model, dm.test_dataloader(), device=device)
+            test_ppl = self._safe_perplexity(test_loss)
+            align_eval_mse, align_eval_per_layer = self._eval_alignment(
+                model=model,
+                device=device,
+                probe_buffers=probe_buffers,
+                eval_idx=probe_eval_idx,
+                layer_pairs=layer_pairs,
+            )
+
+            checkpoint_path = run_output_dir / "student_last.pt"
+            torch.save(model.state_dict(), checkpoint_path)
+
+            metrics = {
+                "train_lm_loss_last": lm_losses[-1] if lm_losses else float("nan"),
+                "train_lm_loss_mean": float(np.mean(lm_losses)) if lm_losses else float("nan"),
+                "train_align_loss_last": align_losses[-1] if align_losses else float("nan"),
+                "train_align_loss_mean": float(np.mean(align_losses)) if align_losses else float("nan"),
+                "train_total_loss_last": float(train_history_rows[-1]["train_total_loss"]) if train_history_rows else float("nan"),
+                "val_loss": val_loss,
+                "val_perplexity": val_ppl,
+                "test_loss": test_loss,
+                "test_perplexity": test_ppl,
+                "align_mse": align_eval_mse,
+                "effective_global_batch_size": int(effective_batch),
+                "lm_loss_weight": float(combo["lm_loss_weight"]),
+                "train_example_offset": int(combo["train_example_offset"]),
+                "training_regime": self.training_regime,
+                "staged_training_enabled": not self._is_control_task_only(),
+                "phase1_steps": int(phase_steps_completed["phase1"]),
+                "phase2_steps": int(phase_steps_completed["phase2"]),
+                "phase3_steps": int(phase_steps_completed["phase3"]),
+                "phase1_best_align_mse": float(phase_best_align.get("phase1", float("nan"))),
+                "phase1_stop_reason": str(phase_stop_reasons.get("phase1", "")),
+                "control_phase23_budget_step": (
+                    int(control_phase23_budget_step) if control_phase23_budget_step is not None else None
+                ),
+                "control_full_budget_step": (
+                    int(control_full_budget_step) if control_full_budget_step is not None else None
+                ),
+                "control_phase23_analysis_checkpoint_path": control_phase23_analysis_checkpoint_path,
+            }
+            for layer_name in self.student_layer_specs:
+                safe = layer_name.replace(".", "__")
+                metrics[f"align_mse__{safe}"] = float(align_eval_per_layer.get(layer_name, float("nan")))
+                if last_align_loss_per_layer:
+                    metrics[f"train_align_loss_last__{safe}"] = float(last_align_loss_per_layer.get(layer_name, float("nan")))
+
+            metrics_path = run_output_dir / "metrics.json"
+            metrics_path.write_text(json.dumps(metrics, indent=2, sort_keys=True), encoding="utf-8")
+            periodic_eval_path = run_output_dir / "periodic_eval.json"
+            periodic_eval_path.write_text(json.dumps(periodic_eval_rows, indent=2, sort_keys=True), encoding="utf-8")
+            train_history_json_path = run_output_dir / "train_history.json"
+            train_history_json_path.write_text(json.dumps(train_history_rows, indent=2, sort_keys=True), encoding="utf-8")
+            train_history_csv_path = run_output_dir / "train_history.csv"
+            fieldnames = sorted({key for row in train_history_rows for key in row.keys()}) if train_history_rows else [
+                "global_step",
+                "phase",
+                "phase_step",
+                "train_lm_loss",
+                "train_align_loss",
+                "train_total_loss",
+                "learning_rate",
+                "aligned_layers_frozen",
+            ]
+            with train_history_csv_path.open("w", encoding="utf-8", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=fieldnames)
+                writer.writeheader()
+                writer.writerows(train_history_rows)
+
+            analysis_index_path = run_output_dir / "analysis_index.json"
+            analysis_index_path.write_text(
+                json.dumps(analysis_jobs, indent=2, sort_keys=True),
+                encoding="utf-8",
+            )
+
+            row = {
+                "result_schema_version": self.RESULT_SCHEMA_VERSION,
+                "family": self.family_name or "unknown",
+                "family_architecture": self.family_architecture or "unknown",
+                "alignment_side": self.alignment_side or "unknown",
+                "layer_scheme": layer_scheme_name,
+                "teacher_layer_specs": self._json_list([pair["teacher_layer"] for pair in layer_pairs]),
+                "student_layer_specs": self._json_list([pair["student_layer"] for pair in layer_pairs]),
+                "layer_loss_weights": self._json_list([float(pair["weight"]) for pair in layer_pairs]),
+                "teacher_model": combo["teacher_model_name_or_path"],
+                "teacher_model_revision": combo["teacher_model_revision"],
+                "student_model": combo["student_model_name_or_path"],
+                "student_model_revision": combo["student_model_revision"],
+                "tokenizer_name": self.tokenizer_name or combo["student_model_name_or_path"],
+                "dataset_name": self.dataset_name,
+                "dataset_config": self.dataset_config,
+                "dataset_path": self.dataset_path,
+                "dataset_revision": self.dataset_revision,
+                "text_field": self.text_field,
+                "train_split": self.train_split,
+                "val_split": self.val_split,
+                "test_split": self.test_split,
+                "probe_split": self.probe_split,
+                "exclude_probe_from_train": bool(self.exclude_probe_from_train),
+                "seed": int(combo_seed),
+                "seed_model_init": int(model_init_seed),
+                "seed_data_order": int(data_order_seed),
+                "seed_dataloader": int(dataloader_seed),
+                "seed_probe": int(probe_seed),
+                "learning_rate": float(combo["learning_rate"]),
+                "max_length": int(combo["max_length"]),
+                "token_budget": None if combo["token_budget"] is None else int(combo["token_budget"]),
+                "train_example_offset": int(combo["train_example_offset"]),
+                "training_regime": self.training_regime,
+                "max_steps": int(global_step),
+                "effective_global_batch_size": int(effective_batch),
+                "lm_loss_weight": float(combo["lm_loss_weight"]),
+                "val_loss": float(val_loss),
+                "val_perplexity": float(val_ppl),
+                "test_loss": float(test_loss),
+                "test_perplexity": float(test_ppl),
+                "align_mse": float(align_eval_mse),
+                "train_lm_loss_last": float(metrics["train_lm_loss_last"]),
+                "train_lm_loss_mean": float(metrics["train_lm_loss_mean"]),
+                "train_align_loss_last": float(metrics["train_align_loss_last"]),
+                "train_align_loss_mean": float(metrics["train_align_loss_mean"]),
+                "train_total_loss_last": float(metrics["train_total_loss_last"]),
+                "num_alignment_layers": int(len(layer_pairs)),
+                "probe_size": int(probe_buffers["n"]),
+                "probe_ids_path": str(self.probe_ids_path) if self.probe_ids_path is not None else "",
+                "teacher_stage": self.teacher_stage,
+                "teacher_target_stage": self.teacher_target_stage,
+                "teacher_probe_ids_key": self.teacher_probe_ids_key,
+                "target_probe_ids_key": self.target_probe_ids_key,
+                "run_dir": str(run_output_dir),
+                "ckpt_path": str(checkpoint_path),
+                "metrics_path": str(metrics_path),
+                "periodic_eval_path": str(periodic_eval_path),
+                "train_history_json_path": str(train_history_json_path),
+                "train_history_csv_path": str(train_history_csv_path),
+                "staged_training_enabled": not self._is_control_task_only(),
+                "phase1_steps": int(phase_steps_completed["phase1"]),
+                "phase2_steps": int(phase_steps_completed["phase2"]),
+                "phase3_steps": int(phase_steps_completed["phase3"]),
+                "phase1_best_align_mse": float(phase_best_align.get("phase1", float("nan"))),
+                "phase1_stop_reason": str(phase_stop_reasons.get("phase1", "")),
+                "control_phase23_budget_step": (
+                    int(control_phase23_budget_step) if control_phase23_budget_step is not None else None
+                ),
+                "control_full_budget_step": (
+                    int(control_full_budget_step) if control_full_budget_step is not None else None
+                ),
+                "control_phase23_analysis_checkpoint_path": control_phase23_analysis_checkpoint_path,
+                "analysis_checkpoint_count": int(len(analysis_jobs)),
+                "analysis_index_path": str(analysis_index_path),
+                "analysis_queue_path": str(analysis_queue_path),
+            }
+            for layer_name in self.student_layer_specs:
+                safe = layer_name.replace(".", "__")
+                row[f"align_mse__{safe}"] = float(align_eval_per_layer.get(layer_name, float("nan")))
+            self._wandb_log_phase_metrics(
+                combo_idx=combo_idx,
+                phase_name="final",
+                step=global_step,
+                metrics={
+                    "final_val_loss": float(val_loss),
+                    "final_val_perplexity": float(val_ppl),
+                    "final_test_loss": float(test_loss),
+                    "final_test_perplexity": float(test_ppl),
+                    "final_align_mse": float(align_eval_mse),
+                    "phase1_steps": float(phase_steps_completed["phase1"]),
+                    "phase2_steps": float(phase_steps_completed["phase2"]),
+                    "phase3_steps": float(phase_steps_completed["phase3"]),
+                },
+                kind="summary",
             )
             return row
         finally:

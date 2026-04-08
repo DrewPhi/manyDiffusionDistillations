@@ -1,0 +1,55 @@
+# @package family
+
+name: deberta_v3
+architecture: encoder_only
+alignment_side: encoder
+model_family: masked_lm
+teacher:
+  model_name_or_path: microsoft/deberta-v3-large
+  model_revision: main
+  trust_remote_code: false
+student:
+  model_name_or_path: microsoft/deberta-v3-base
+  model_revision: main
+  trust_remote_code: false
+  init_from_scratch: true
+  penultimate_dim: 768
+tokenizer_name: microsoft/deberta-v3-base
+candidate_teachers:
+  - microsoft/deberta-v3-large
+candidate_students:
+  - microsoft/deberta-v3-base
+  - microsoft/deberta-v3-small
+  - microsoft/deberta-v3-xsmall
+custom_students:
+  - key: deberta_v3_61m
+    parameter_count: 60507876
+    model_name_or_path: microsoft/deberta-v3-base
+    model_config_name_or_path: microsoft/deberta-v3-base
+    model_revision: main
+    trust_remote_code: false
+    init_from_scratch: true
+    penultimate_dim: 384
+    tokenizer_name: microsoft/deberta-v3-base
+    model_config_overrides:
+      hidden_size: 384
+      num_hidden_layers: 6
+      num_attention_heads: 6
+      intermediate_size: 1536
+  - key: deberta_v3_111m
+    parameter_count: 110737380
+    model_name_or_path: microsoft/deberta-v3-base
+    model_config_name_or_path: microsoft/deberta-v3-base
+    model_revision: main
+    trust_remote_code: false
+    init_from_scratch: true
+    penultimate_dim: 576
+    tokenizer_name: microsoft/deberta-v3-base
+    model_config_overrides:
+      hidden_size: 576
+      num_hidden_layers: 9
+      num_attention_heads: 9
+      intermediate_size: 2304
+layer_paths:
+  second: deberta.encoder.layer[1]
+  penultimate: deberta.encoder.layer[-2]

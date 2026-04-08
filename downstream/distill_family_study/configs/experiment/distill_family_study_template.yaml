@@ -15,9 +15,9 @@
 #     layer_scheme=second_plus_penultimate
 #
 #   uv run python -m manylatents.main experiment=distill_family_study_template \
-#     family=t5 \
+#     family=bert \
 #     layer_scheme=second_plus_penultimate \
-#     stage_pipeline.params.sweep.student_model=[google-t5/t5-small,google-t5/t5-base]
+#     stage_pipeline.params.sweep.student_model=[bert-base-uncased]
 
 name: distill_family_study_template
 project: manylatents_distillation
@@ -41,6 +41,7 @@ data:
   dataset_path: ${stage_pipeline.params.data.dataset_path}
   dataset_revision: ${stage_pipeline.params.data.dataset_revision}
   text_field: ${stage_pipeline.params.data.text_field}
+  lm_objective: ${stage_pipeline.params.data.lm_objective}
   train_split: ${stage_pipeline.params.data.train_split}
   val_split: ${stage_pipeline.params.data.val_split}
   test_split: ${stage_pipeline.params.data.test_split}
@@ -59,6 +60,8 @@ algorithms:
   lightning:
     config:
       model_name_or_path: ${stage_pipeline.params.student.model_name_or_path}
+      model_config_name_or_path: ${stage_pipeline.params.student.model_config_name_or_path}
+      model_config_overrides: ${stage_pipeline.params.student.model_config_overrides}
       learning_rate: ${stage_pipeline.params.optimizer.learning_rate}
       weight_decay: ${stage_pipeline.params.optimizer.weight_decay}
       warmup_steps: ${stage_pipeline.params.lr_scheduler.warmup_steps}

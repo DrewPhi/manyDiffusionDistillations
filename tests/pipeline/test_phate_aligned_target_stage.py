@@ -22,10 +22,33 @@ class _DummyPHATE:
         return torch.from_numpy(out.astype(np.float32))
 
 
+class _DummyWandb:
+    def __init__(self):
+        self.run = object()
+        self.logged = []
+
+    class Table:
+        def __init__(self, columns):
+            self.columns = columns
+            self.rows = []
+
+        def add_data(self, *row):
+            self.rows.append(row)
+
+    class Image:
+        def __init__(self, path):
+            self.path = path
+
+    def log(self, payload):
+        self.logged.append(payload)
+
+
 def test_phate_aligned_target_stage_builds_aligned_targets(monkeypatch, tmp_path):
     import manylatents.pipeline.stages.phate_aligned_target as aligned_stage_module
 
     monkeypatch.setattr(aligned_stage_module, "PHATEModule", _DummyPHATE)
+    dummy_wandb = _DummyWandb()
+    monkeypatch.setattr(aligned_stage_module, "wandb", dummy_wandb)
 
     n = 6
     diffusion = np.eye(n, dtype=np.float32)
@@ -63,17 +86,30 @@ def test_phate_aligned_target_stage_builds_aligned_targets(monkeypatch, tmp_path
 
     assert "aligned_targets" in outputs
     assert "phate_targets" in outputs  # compatibility alias
+    assert "teacher_phate_targets" in outputs
+    assert "teacher_phate_targets_2d" in outputs
+    assert "teacher_phate_target_images_2d" in outputs
     assert len(outputs["aligned_targets"]) == 1
+    assert len(outputs["teacher_phate_targets"]) == 1
+    assert len(outputs["teacher_phate_targets_2d"]) == 1
+    assert len(outputs["teacher_phate_target_images_2d"]) == 1
     assert Path(outputs["aligned_targets_index"]).exists()
 
     aligned = np.load(outputs["aligned_targets"][0])
+    teacher_phate = np.load(outputs["teacher_phate_targets"][0])
+    teacher_phate_2d = np.load(outputs["teacher_phate_targets_2d"][0])
     assert aligned.shape == (n, 4)
+    assert teacher_phate.shape == (n, 4)
+    assert teacher_phate_2d.shape == (n, 2)
+    assert Path(outputs["teacher_phate_target_images_2d"][0]).exists()
+    assert len(dummy_wandb.logged) == 1
 
 
 def test_phate_aligned_target_stage_builds_per_layer_targets(monkeypatch, tmp_path):
     import manylatents.pipeline.stages.phate_aligned_target as aligned_stage_module
 
     monkeypatch.setattr(aligned_stage_module, "PHATEModule", _DummyPHATE)
+    monkeypatch.setattr(aligned_stage_module, "wandb", None)
 
     n = 5
     raw_dir = tmp_path / "raw_activations"
@@ -114,6 +150,14 @@ def test_phate_aligned_target_stage_builds_per_layer_targets(monkeypatch, tmp_pa
 
     assert outputs["aligned_target_layers"] == layer_names
     assert set(outputs["aligned_target_paths_by_layer"].keys()) == set(layer_names)
+    assert set(outputs["teacher_phate_target_paths_by_layer"].keys()) == set(layer_names)
+    assert set(outputs["teacher_phate_target_paths_2d_by_layer"].keys()) == set(layer_names)
+    assert set(outputs["teacher_phate_target_image_paths_2d_by_layer"].keys()) == set(layer_names)
     for layer_name in layer_names:
         aligned = np.load(outputs["aligned_target_paths_by_layer"][layer_name])
+        teacher_phate = np.load(outputs["teacher_phate_target_paths_by_layer"][layer_name])
+        teacher_phate_2d = np.load(outputs["teacher_phate_target_paths_2d_by_layer"][layer_name])
         assert aligned.shape == (n, 3)
+        assert teacher_phate.shape == (n, 3)
+        assert teacher_phate_2d.shape == (n, 2)
+        assert Path(outputs["teacher_phate_target_image_paths_2d_by_layer"][layer_name]).exists()

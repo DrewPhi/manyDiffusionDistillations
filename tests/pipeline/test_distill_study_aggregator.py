@@ -52,7 +52,7 @@ def test_load_result_rows_reads_expected_study_run_locations(tmp_path):
         "family": "pythia",
         "student_key": "pythia_410m",
         "layer_scheme": "penultimate_only",
-        "lambda_align": 0.5,
+        "staged_training_enabled": True,
         "seed": 42,
         "probe_size": 1024,
         "hydra_overrides": ["output_dir=./outputs"],
@@ -70,4 +70,5 @@ def test_load_result_rows_reads_expected_study_run_locations(tmp_path):
     assert not missing
     assert len(rows) == 1
     assert rows[0]["study_run_name"] == "demo_run"
+    assert rows[0]["study_staged_training_enabled"] is True
     assert rows[0]["study_expected_run_dir"] == str(repo_root / "outputs" / "pipelines" / "demo_run")

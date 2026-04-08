@@ -9,12 +9,30 @@ from manylatents.data.text import TextDataModule
 class _DummyTokenizer:
     pad_token = None
     eos_token = "<eos>"
+    mask_token = "[MASK]"
+    deprecation_warnings = {}
 
     def __call__(self, texts, truncation=True, max_length=8, padding="max_length", return_tensors="pt"):
         n = len(texts)
         ids = torch.zeros((n, max_length), dtype=torch.long)
         mask = torch.ones((n, max_length), dtype=torch.long)
         return {"input_ids": ids, "attention_mask": mask}
+
+    def __len__(self):
+        return 30522
+
+    def get_special_tokens_mask(self, val, already_has_special_tokens=True):
+        return [0 for _ in val]
+
+    def convert_tokens_to_ids(self, token):
+        if token == self.mask_token:
+            return 103
+        return 0
+
+    def pad(self, encoded_inputs, return_tensors="pt", pad_to_multiple_of=None, **kwargs):
+        input_ids = torch.stack([item["input_ids"] for item in encoded_inputs])
+        attention_mask = torch.stack([item["attention_mask"] for item in encoded_inputs])
+        return {"input_ids": input_ids, "attention_mask": attention_mask}
 
 
 def _fake_load_dataset(*_args, **_kwargs):
@@ -23,6 +41,7 @@ def _fake_load_dataset(*_args, **_kwargs):
     return {
         "train": train,
         "validation": validation,
+        "test": validation,
         "probe": validation,
     }
 
@@ -233,6 +252,29 @@ def test_text_datamodule_reuses_cached_split_indices(monkeypatch, tmp_path):
     dm_second.setup(stage="probe")
 
     assert len(dm_second.probe_dataset) == 3
+
+
+def test_text_datamodule_masked_lm_train_collator_masks_labels(monkeypatch):
+    monkeypatch.setattr("transformers.AutoTokenizer.from_pretrained", lambda *_a, **_k: _DummyTokenizer())
+    monkeypatch.setattr("datasets.load_dataset", _fake_load_dataset)
+
+    dm = TextDataModule(
+        dataset_name="dummy",
+        dataset_config=None,
+        train_split="train",
+        val_split="validation",
+        probe_split="probe",
+        lm_objective="masked_lm",
+        max_length=8,
+        probe_n_samples=2,
+        seed=42,
+    )
+    dm.setup()
+
+    batch = dm._task_collate_fn([dm.train_dataset[0], dm.train_dataset[1]])
+    assert set(batch.keys()) == {"input_ids", "attention_mask", "labels"}
+    assert batch["labels"].shape == batch["input_ids"].shape
+    assert (batch["labels"] != -100).any()
 
 
 def test_text_datamodule_rebuilds_split_index_cache_on_metadata_mismatch(monkeypatch, tmp_path):

@@ -47,7 +47,7 @@ def test_hf_trainer_configure_model_from_config_mode(monkeypatch):
     class DummyConfig:
         hidden_size = 768
 
-    def fake_auto_config_from_pretrained(name, trust_remote_code=False, revision=None):
+    def fake_auto_config_from_pretrained(name, trust_remote_code=False, revision=None, **kwargs):
         calls["config_source"] = name
         calls["config_trust_remote_code"] = trust_remote_code
         calls["config_revision"] = revision
@@ -64,7 +64,7 @@ def test_hf_trainer_configure_model_from_config_mode(monkeypatch):
         calls["config_num_hidden_layers"] = getattr(cfg, "num_hidden_layers", None)
         return DummyNetwork()
 
-    def fake_tokenizer_from_pretrained(name, trust_remote_code=False):
+    def fake_tokenizer_from_pretrained(name, trust_remote_code=False, **kwargs):
         calls["tokenizer_source"] = name
         calls["tokenizer_trust_remote_code"] = trust_remote_code
         return object()
@@ -103,6 +103,35 @@ def test_hf_trainer_configure_model_from_config_mode(monkeypatch):
     assert calls["config_source"] == "EleutherAI/pythia-70m"
     assert calls["config_num_hidden_layers"] == 2
     assert calls["tokenizer_source"] == "EleutherAI/pythia-70m"
+
+
+def test_hf_trainer_uses_masked_lm_loader_for_encoder_only_models(monkeypatch):
+    calls = {}
+
+    class DummyNetwork:
+        pass
+
+    def fake_masked_lm_from_pretrained(*args, **kwargs):
+        calls["masked_lm_called"] = kwargs
+        return DummyNetwork()
+
+    monkeypatch.setattr(
+        "manylatents.lightning.hf_trainer.AutoModelForMaskedLM.from_pretrained",
+        fake_masked_lm_from_pretrained,
+    )
+    monkeypatch.setattr(
+        "manylatents.lightning.hf_trainer.AutoTokenizer.from_pretrained",
+        lambda *args, **kwargs: object(),
+    )
+
+    config = HFTrainerConfig(
+        model_name_or_path="bert-base-uncased",
+        model_family="masked_lm",
+    )
+    module = HFTrainerModule(config)
+    module.configure_model()
+
+    assert "masked_lm_called" in calls
 
 
 @pytest.mark.slow

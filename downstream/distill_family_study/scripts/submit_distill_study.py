@@ -86,13 +86,6 @@ def parse_args() -> argparse.Namespace:
         help="Restrict to one or more layer schemes, e.g. --layer-scheme penultimate_only.",
     )
     parser.add_argument(
-        "--lambda-align",
-        action="append",
-        type=float,
-        default=None,
-        help="Restrict to one or more lambda_align values, e.g. --lambda-align 0.0 --lambda-align 0.5.",
-    )
-    parser.add_argument(
         "--probe-teacher-manifest",
         type=Path,
         default=None,
@@ -134,7 +127,8 @@ def _write_manifest_csv(path: Path, rows: list[dict[str, Any]]) -> None:
         "family",
         "student_key",
         "layer_scheme",
-        "lambda_align",
+        "training_regime",
+        "staged_training_enabled",
         "seed",
         "run_spec_path",
         "submitted",
@@ -180,7 +174,6 @@ def _filter_runs(
     families: list[str] | None = None,
     student_keys: list[str] | None = None,
     layer_schemes: list[str] | None = None,
-    lambda_align_values: list[float] | None = None,
     limit: int | None = None,
 ) -> list[dict[str, Any]]:
     filtered = list(runs)
@@ -194,9 +187,6 @@ def _filter_runs(
     if layer_schemes:
         allowed_layer_schemes = set(layer_schemes)
         filtered = [run for run in filtered if run["layer_scheme"] in allowed_layer_schemes]
-    if lambda_align_values:
-        allowed_lambdas = {float(value) for value in lambda_align_values}
-        filtered = [run for run in filtered if float(run["lambda_align"]) in allowed_lambdas]
     if limit is not None:
         filtered = filtered[:limit]
 
@@ -214,7 +204,6 @@ def main() -> None:
         families=args.family,
         student_keys=args.student_key,
         layer_schemes=args.layer_scheme,
-        lambda_align_values=args.lambda_align,
         limit=args.limit,
     )
 
@@ -263,7 +252,8 @@ def main() -> None:
             "family": run["family"],
             "student_key": run["student_key"],
             "layer_scheme": run["layer_scheme"],
-            "lambda_align": run["lambda_align"],
+            "training_regime": run["training_regime"],
+            "staged_training_enabled": run["staged_training_enabled"],
             "seed": run["seed"],
             "run_spec_path": str(run_spec_path.resolve()),
             "submitted": args.submit,

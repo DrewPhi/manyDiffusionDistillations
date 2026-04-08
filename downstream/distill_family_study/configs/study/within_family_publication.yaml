@@ -2,7 +2,7 @@
 # Publication-scale within-family distillation study.
 #
 # This config is the declarative source of truth for the README plan:
-#   3 families x 3 students x 3 lambda values x 2 layer schemes = 54 runs
+#   4 families x 3 students x 2 layer schemes x 2 regimes = 48 runs
 #
 # It is intentionally separate from experiment/stage_pipeline configs. The study
 # layer answers "which runs should exist?" while experiment configs answer
@@ -11,14 +11,18 @@
 study:
   name: within_family_publication
   description: >
-    Within-family PHATE-target distillation matrix across Pythia, Qwen2.5, and
-    T5 with fixed teachers, three student scales per family, three
-    lambda_align values, and two layer-matching schemes.
+    Within-family PHATE-target distillation matrix across Pythia, Qwen2.5,
+    BERT, and DeBERTa-v3 with fixed teachers, three student scales per family,
+    staged and task-only-control regimes, and two layer-matching schemes.
   experiment: distill_family_study_template
+  training_regimes:
+    - staged
+    - control_task_only
   family_order:
     - pythia
     - qwen
-    - t5
+    - bert
+    - deberta_v3
   layer_schemes:
     - penultimate_only
     - second_plus_penultimate
@@ -64,6 +68,27 @@ study:
       analysis_checkpoint_steps: []
       gradient_clip_norm: 1.0
       train_history_every_n_steps: 10
+      staged_training:
+        enabled: true
+        phase1:
+          objective: alignment_only
+          min_steps: 500
+          max_steps: 5000
+          eval_every_n_steps: 100
+          early_stop_patience: 5
+          early_stop_min_delta: 1.0e-4
+        phase2:
+          objective: task_only_frozen
+          max_steps: 20000
+        phase3:
+          objective: task_only_unfrozen
+          max_steps: 5000
+        checkpoint_analysis:
+          enabled: true
+          phase1_snapshots: 5
+          phase2_snapshots: 10
+          phase3_snapshots: 5
+          include_phase_end: true
     optimizer:
       name: adamw
       learning_rate: 3.0e-4
@@ -80,12 +105,6 @@ study:
     alignment:
       loss: mse
       mse_reduction: mean
-      lambda_values: [0.0, 0.5, 1.0]
-      lambda_schedule: constant
-      lambda_ramp_steps: 0
-      scheduled_lambda_values: [1.0]
-      scheduled_lambda_schedule: ramp
-      scheduled_lambda_ramp_fraction: 0.2
       batch_size: 16
       eval_batch_size: 8
       sample_every_n_steps: 1
@@ -128,6 +147,7 @@ study:
           tokenizer_name: EleutherAI/pythia-2.8b
 
     qwen:
+      model_family: causal_lm
       family_config: qwen
       teacher:
         model_name_or_path: Qwen/Qwen2.5-14B
@@ -157,32 +177,76 @@ study:
           penultimate_dim: 2048
           tokenizer_name: Qwen/Qwen2.5-3B
 
-    t5:
-      family_config: t5
+    bert:
+      model_family: masked_lm
+      family_config: bert
       teacher:
-        model_name_or_path: google-t5/t5-3b
+        model_name_or_path: bert-large-uncased
         model_revision: main
         trust_remote_code: false
-      tokenizer_name: google-t5/t5-small
+      tokenizer_name: bert-base-uncased
       students:
-        - key: t5_small
-          model_name_or_path: google-t5/t5-small
+        - key: bert_11m
+          model_name_or_path: bert-base-uncased
+          model_config_name_or_path: bert-base-uncased
+          model_revision: main
+          trust_remote_code: false
+          init_from_scratch: true
+          penultimate_dim: 256
+          tokenizer_name: bert-base-uncased
+          model_config_overrides:
+            hidden_size: 256
+            num_hidden_layers: 4
+            num_attention_heads: 4
+            intermediate_size: 1024
+        - key: bert_41m
+          model_name_or_path: bert-base-uncased
+          model_config_name_or_path: bert-base-uncased
           model_revision: main
           trust_remote_code: false
           init_from_scratch: true
           penultimate_dim: 512
-          tokenizer_name: google-t5/t5-small
-        - key: t5_base
-          model_name_or_path: google-t5/t5-base
+          tokenizer_name: bert-base-uncased
+          model_config_overrides:
+            hidden_size: 512
+            num_hidden_layers: 8
+            num_attention_heads: 8
+            intermediate_size: 2048
+        - key: bert_base
+          model_name_or_path: bert-base-uncased
           model_revision: main
           trust_remote_code: false
           init_from_scratch: true
           penultimate_dim: 768
-          tokenizer_name: google-t5/t5-base
-        - key: t5_large
-          model_name_or_path: google-t5/t5-large
+          tokenizer_name: bert-base-uncased
+
+    deberta_v3:
+      model_family: masked_lm
+      family_config: deberta_v3
+      teacher:
+        model_name_or_path: microsoft/deberta-v3-large
+        model_revision: main
+        trust_remote_code: false
+      tokenizer_name: microsoft/deberta-v3-base
+      students:
+        - key: deberta_v3_xsmall
+          model_name_or_path: microsoft/deberta-v3-xsmall
           model_revision: main
           trust_remote_code: false
           init_from_scratch: true
-          penultimate_dim: 1024
-          tokenizer_name: google-t5/t5-large
+          penultimate_dim: 384
+          tokenizer_name: microsoft/deberta-v3-base
+        - key: deberta_v3_small
+          model_name_or_path: microsoft/deberta-v3-small
+          model_revision: main
+          trust_remote_code: false
+          init_from_scratch: true
+          penultimate_dim: 768
+          tokenizer_name: microsoft/deberta-v3-base
+        - key: deberta_v3_base
+          model_name_or_path: microsoft/deberta-v3-base
+          model_revision: main
+          trust_remote_code: false
+          init_from_scratch: true
+          penultimate_dim: 768
+          tokenizer_name: microsoft/deberta-v3-base

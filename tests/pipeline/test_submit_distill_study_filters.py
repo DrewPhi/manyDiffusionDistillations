@@ -15,22 +15,21 @@ def _materialized_runs() -> list[dict]:
     return [run.as_dict() for run in materialize_study(cfg)]
 
 
-def test_filter_runs_supports_layer_scheme_and_lambda_align():
+def test_filter_runs_supports_layer_scheme():
     runs = _materialized_runs()
 
     filtered = _filter_runs(
         runs,
-        families=["t5"],
-        student_keys=["t5_small"],
+        families=["bert"],
+        student_keys=["bert_11m"],
         layer_schemes=["penultimate_only"],
-        lambda_align_values=[0.0, 0.5],
     )
 
     assert len(filtered) == 2
-    assert {run["family"] for run in filtered} == {"t5"}
-    assert {run["student_key"] for run in filtered} == {"t5_small"}
+    assert {run["family"] for run in filtered} == {"bert"}
+    assert {run["student_key"] for run in filtered} == {"bert_11m"}
     assert {run["layer_scheme"] for run in filtered} == {"penultimate_only"}
-    assert {float(run["lambda_align"]) for run in filtered} == {0.0, 0.5}
+    assert {run["training_regime"] for run in filtered} == {"staged", "control_task_only"}
 
 
 def test_filter_runs_can_build_one_student_per_family_slice():
@@ -38,17 +37,16 @@ def test_filter_runs_can_build_one_student_per_family_slice():
 
     filtered = _filter_runs(
         runs,
-        families=["pythia", "qwen", "t5"],
-        student_keys=["pythia_410m", "qwen2_5_0_5b", "t5_small"],
+        families=["pythia", "qwen", "bert", "deberta_v3"],
+        student_keys=["pythia_410m", "qwen2_5_0_5b", "bert_11m", "deberta_v3_xsmall"],
         layer_schemes=["penultimate_only"],
-        lambda_align_values=[0.0, 0.5],
     )
 
-    assert len(filtered) == 6
-    assert {run["family"] for run in filtered} == {"pythia", "qwen", "t5"}
-    assert {run["student_key"] for run in filtered} == {"pythia_410m", "qwen2_5_0_5b", "t5_small"}
+    assert len(filtered) == 8
+    assert {run["family"] for run in filtered} == {"pythia", "qwen", "bert", "deberta_v3"}
+    assert {run["student_key"] for run in filtered} == {"pythia_410m", "qwen2_5_0_5b", "bert_11m", "deberta_v3_xsmall"}
     assert {run["layer_scheme"] for run in filtered} == {"penultimate_only"}
-    assert {float(run["lambda_align"]) for run in filtered} == {0.0, 0.5}
+    assert {run["training_regime"] for run in filtered} == {"staged", "control_task_only"}
 
 
 def test_filter_runs_applies_limit_last():
@@ -56,13 +54,12 @@ def test_filter_runs_applies_limit_last():
 
     filtered = _filter_runs(
         runs,
-        families=["t5"],
-        student_keys=["t5_small"],
+        families=["bert"],
+        student_keys=["bert_11m"],
         layer_schemes=["penultimate_only"],
-        lambda_align_values=[0.0, 0.5],
         limit=1,
     )
 
     assert len(filtered) == 1
-    assert filtered[0]["family"] == "t5"
-    assert filtered[0]["student_key"] == "t5_small"
+    assert filtered[0]["family"] == "bert"
+    assert filtered[0]["student_key"] == "bert_11m"
