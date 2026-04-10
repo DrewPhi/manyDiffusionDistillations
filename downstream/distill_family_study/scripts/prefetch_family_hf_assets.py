@@ -156,7 +156,29 @@ def _read_explicit_args(args: argparse.Namespace) -> tuple[RepoSpec, RepoSpec, b
     return teacher_spec, student_spec, bool(args.student_init_from_scratch), tokenizer_spec
 
 
-def _ensure_tokenizer(spec: RepoSpec) -> str:
+def _tokenizer_backend_error(spec: RepoSpec, exc: Exception) -> RuntimeError:
+    message = str(exc)
+    missing_packages: list[str] = []
+    normalized = message.lower()
+
+    if "sentencepiece" in normalized:
+        missing_packages.append("sentencepiece")
+    if "tiktoken" in normalized:
+        missing_packages.append("tiktoken")
+
+    if missing_packages:
+        missing_csv = ", ".join(sorted(set(missing_packages)))
+        return RuntimeError(
+            f"Tokenizer '{spec.repo_id}' requires missing tokenizer backend package(s): {missing_csv}. "
+            "Install the Hugging Face tokenizer extras in the runtime environment before launching offline runs."
+        )
+
+    error = RuntimeError(f"Tokenizer validation failed for '{spec.repo_id}': {exc}")
+    error.__cause__ = exc
+    return error
+
+
+def _validate_tokenizer(spec: RepoSpec) -> None:
     try:
         AutoTokenizer.from_pretrained(
             spec.repo_id,
@@ -164,8 +186,17 @@ def _ensure_tokenizer(spec: RepoSpec) -> str:
             trust_remote_code=spec.trust_remote_code,
             local_files_only=True,
         )
+    except Exception as exc:
+        raise _tokenizer_backend_error(spec, exc)
+
+
+def _ensure_tokenizer(spec: RepoSpec) -> str:
+    try:
+        _validate_tokenizer(spec)
         return "cached"
-    except Exception:
+    except RuntimeError as exc:
+        if "missing tokenizer backend package(s)" in str(exc):
+            raise
         with _online_hf_access():
             snapshot_download(
                 repo_id=spec.repo_id,
@@ -173,6 +204,7 @@ def _ensure_tokenizer(spec: RepoSpec) -> str:
                 repo_type="model",
                 allow_patterns=TOKENIZER_PATTERNS,
             )
+        _validate_tokenizer(spec)
         return "downloaded"
 
 

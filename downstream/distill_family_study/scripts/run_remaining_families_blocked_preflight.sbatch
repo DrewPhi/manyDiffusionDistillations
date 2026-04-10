@@ -1,7 +1,14 @@
 #!/bin/bash
-# Minimal staged-training smoke on one A100 GPU.
+# Focused preflight for the remaining-family smoke blockers.
+#
+# This job runs only:
+# - deberta_v3_xsmall staged
+# - qwen2_5_0_5b staged
+#
+# using the exact remaining-families smoke config and the same prefetch,
+# offline execution, and detached-analysis path as the full smoke wrapper.
 
-#SBATCH --job-name=staged_smoke_a100
+#SBATCH --job-name=remaining_blocked_preflight
 #SBATCH --output=outputs/slurm/%x-%j.out
 #SBATCH --error=outputs/slurm/%x-%j.err
 #SBATCH --time=24:00:00
@@ -49,18 +56,39 @@ echo "[hf-cache] HF_HUB_CACHE=${HF_HUB_CACHE}"
 echo "[hf-cache] HF_DATASETS_CACHE=${HF_DATASETS_CACHE}"
 echo "[hf-cache] TRANSFORMERS_CACHE=${TRANSFORMERS_CACHE}"
 
-MANIFEST_DIR=${MANIFEST_DIR:-results/study_manifests/staged_smoke_a100_1gpu}
+MANIFEST_DIR=${MANIFEST_DIR:-results/study_manifests/remaining_families_blocked_preflight}
 RUN_SPECS_DIR="${MANIFEST_DIR}/run_specs"
 mkdir -p "${RUN_SPECS_DIR}"
 find "${RUN_SPECS_DIR}" -maxdepth 1 -name '*.json' -delete
 
 python downstream/distill_family_study/scripts/submit_distill_study.py \
-  --study-config downstream/distill_family_study/configs/study/staged_smoke_a100_1gpu.yaml \
-  --manifest-dir "${MANIFEST_DIR}"
+  --study-config downstream/distill_family_study/configs/study/staged_smoke_remaining_families_a100_1gpu.yaml \
+  --manifest-dir "${MANIFEST_DIR}" \
+  --family deberta_v3 \
+  --family qwen \
+  --student-key deberta_v3_xsmall \
+  --student-key qwen2_5_0_5b
 
-mapfile -t RUN_SPEC_PATHS < <(find "${RUN_SPECS_DIR}" -maxdepth 1 -name '*.json' | sort)
-if [[ "${#RUN_SPEC_PATHS[@]}" -eq 0 ]]; then
-  echo "ERROR: no run spec materialized under ${RUN_SPECS_DIR}"
+mapfile -t RUN_SPEC_PATHS < <(
+  python - <<'PY' "${RUN_SPECS_DIR}"
+import json
+import sys
+from pathlib import Path
+
+run_specs_dir = Path(sys.argv[1])
+selected = []
+for path in sorted(run_specs_dir.glob("*.json")):
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if payload.get("training_regime") == "staged":
+        selected.append(str(path))
+for item in selected:
+    print(item)
+PY
+)
+
+if [[ "${#RUN_SPEC_PATHS[@]}" -ne 2 ]]; then
+  echo "ERROR: expected exactly 2 staged run specs, found ${#RUN_SPEC_PATHS[@]}"
+  printf '%s\n' "${RUN_SPEC_PATHS[@]}"
   exit 2
 fi
 
@@ -98,10 +126,4 @@ PY
     --queue-path "${QUEUE_PATH}"
 done
 
-python downstream/distill_family_study/scripts/aggregate_distill_study.py \
-  --manifest-dir "${MANIFEST_DIR}" \
-  --output-dir "results/publication_within_family/staged_smoke_a100_1gpu"
-
-python downstream/distill_family_study/scripts/plot_distill_study.py \
-  --input-dir "results/publication_within_family/staged_smoke_a100_1gpu" \
-  --output-dir "results/publication_within_family/staged_smoke_a100_1gpu/figures"
+echo "Focused remaining-family preflight completed successfully."

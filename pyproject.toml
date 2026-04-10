@@ -53,7 +53,11 @@ dependencies = [
 # Experiment tracking (wandb)
 tracking = ["wandb>=0.19"]
 # HuggingFace trainer support
-hf = ["transformers>=4.40"]
+hf = [
+    "transformers>=4.40",
+    "sentencepiece",
+    "tiktoken",
+]
 # Neural ODE / SDE dynamics
 dynamics = ["torchdiffeq>=0.2", "torchsde>=0.2"]
 # Optimal transport (DiffusionMerging)

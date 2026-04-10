@@ -12,7 +12,9 @@
 
 set -euo pipefail
 
-cd /home/mila/d/drewd/newManylatents/manylatents
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+REPO_ROOT=$(cd "${SCRIPT_DIR}/../../.." && pwd)
+cd "${REPO_ROOT}"
 mkdir -p outputs/slurm
 
 if [[ -z "${RUN_SPEC_PATH:-}" ]]; then
@@ -39,12 +41,24 @@ fi
 
 export HYDRA_FULL_ERROR=1
 
-SCRATCH_ROOT=${SCRATCH_ROOT:-/home/mila/d/drewd/scratch}
+SCRATCH_ROOT=${SCRATCH_ROOT:-${SCRATCH:-${HOME}/scratch}}
 export HF_HOME="${SCRATCH_ROOT}/hf_home"
+export HF_HUB_CACHE="${HF_HOME}/hub"
 export HF_DATASETS_CACHE="${SCRATCH_ROOT}/hf_datasets"
 export TRANSFORMERS_CACHE="${SCRATCH_ROOT}/hf_models"
 export TMPDIR="${SCRATCH_ROOT}/tmp"
 mkdir -p "${HF_HOME}" "${HF_DATASETS_CACHE}" "${TRANSFORMERS_CACHE}" "${TMPDIR}"
+for CACHE_DIR in "${HF_HOME}" "${HF_HUB_CACHE}" "${HF_DATASETS_CACHE}" "${TRANSFORMERS_CACHE}" "${TMPDIR}"; do
+  mkdir -p "${CACHE_DIR}"
+  if [[ ! -w "${CACHE_DIR}" ]]; then
+    echo "ERROR: cache path is not writable: ${CACHE_DIR}"
+    exit 2
+  fi
+done
+echo "[hf-cache] HF_HOME=${HF_HOME}"
+echo "[hf-cache] HF_HUB_CACHE=${HF_HUB_CACHE}"
+echo "[hf-cache] HF_DATASETS_CACHE=${HF_DATASETS_CACHE}"
+echo "[hf-cache] TRANSFORMERS_CACHE=${TRANSFORMERS_CACHE}"
 
 python - <<'PY'
 import importlib.util
