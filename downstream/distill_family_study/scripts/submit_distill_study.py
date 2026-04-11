@@ -97,6 +97,12 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Optional manifest for reusing phate_teacher_target artifacts across submitted runs. Only valid when all submitted runs share the same student penultimate dimension.",
     )
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=None,
+        help="Optional override for the materialized Hydra output_dir used by all emitted run specs.",
+    )
     return parser.parse_args()
 
 
@@ -151,6 +157,7 @@ def _inject_reusable_artifacts(
     run: dict[str, Any],
     probe_manifest: Path | None,
     phate_manifest: Path | None,
+    output_dir: Path | None,
 ) -> dict[str, Any]:
     updated = dict(run)
     overrides = list(run["hydra_overrides"])
@@ -164,6 +171,8 @@ def _inject_reusable_artifacts(
             "stage_pipeline.params.reusable_artifacts.phate_teacher_target_manifest_path="
             f"{phate_manifest.resolve()}"
         )
+    if output_dir is not None:
+        overrides.append(f"output_dir={output_dir.resolve()}")
     updated["hydra_overrides"] = overrides
     return updated
 
@@ -219,6 +228,7 @@ def main() -> None:
             run,
             probe_manifest=args.probe_teacher_manifest,
             phate_manifest=args.phate_target_manifest,
+            output_dir=args.output_dir,
         )
         for run in runs
     ]

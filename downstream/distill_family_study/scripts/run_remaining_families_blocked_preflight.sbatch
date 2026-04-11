@@ -19,10 +19,15 @@
 
 set -euo pipefail
 
-SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-REPO_ROOT=$(cd "${SCRIPT_DIR}/../../.." && pwd)
+if [[ -n "${REPO_ROOT:-}" ]]; then
+  REPO_ROOT="${REPO_ROOT}"
+elif [[ -n "${SLURM_SUBMIT_DIR:-}" ]]; then
+  REPO_ROOT="${SLURM_SUBMIT_DIR}"
+else
+  SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+  REPO_ROOT=$(cd "${SCRIPT_DIR}/../../.." && pwd)
+fi
 cd "${REPO_ROOT}"
-mkdir -p outputs/slurm
 export PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}"
 
 module load miniconda
@@ -38,11 +43,13 @@ export WANDB_MODE=${WANDB_MODE:-online}
 export HYDRA_FULL_ERROR=1
 
 SCRATCH_ROOT=${SCRATCH_ROOT:-${SCRATCH:-${HOME}/scratch}}
+ARTIFACT_ROOT=${ARTIFACT_ROOT:-${SCRATCH_ROOT}/manyDiffusionDistillations}
 export HF_HOME="${SCRATCH_ROOT}/hf_home"
 export HF_HUB_CACHE="${HF_HOME}/hub"
 export HF_DATASETS_CACHE="${SCRATCH_ROOT}/hf_datasets"
 export TRANSFORMERS_CACHE="${SCRATCH_ROOT}/hf_models"
 export TMPDIR="${SCRATCH_ROOT}/tmp"
+OUTPUT_DIR=${OUTPUT_DIR_OVERRIDE:-${ARTIFACT_ROOT}/outputs}
 mkdir -p "${HF_HOME}" "${HF_DATASETS_CACHE}" "${TRANSFORMERS_CACHE}" "${TMPDIR}"
 for CACHE_DIR in "${HF_HOME}" "${HF_HUB_CACHE}" "${HF_DATASETS_CACHE}" "${TRANSFORMERS_CACHE}" "${TMPDIR}"; do
   mkdir -p "${CACHE_DIR}"
@@ -56,7 +63,7 @@ echo "[hf-cache] HF_HUB_CACHE=${HF_HUB_CACHE}"
 echo "[hf-cache] HF_DATASETS_CACHE=${HF_DATASETS_CACHE}"
 echo "[hf-cache] TRANSFORMERS_CACHE=${TRANSFORMERS_CACHE}"
 
-MANIFEST_DIR=${MANIFEST_DIR:-results/study_manifests/remaining_families_blocked_preflight}
+MANIFEST_DIR=${MANIFEST_DIR:-${ARTIFACT_ROOT}/study_manifests/remaining_families_blocked_preflight}
 RUN_SPECS_DIR="${MANIFEST_DIR}/run_specs"
 mkdir -p "${RUN_SPECS_DIR}"
 find "${RUN_SPECS_DIR}" -maxdepth 1 -name '*.json' -delete
@@ -64,6 +71,7 @@ find "${RUN_SPECS_DIR}" -maxdepth 1 -name '*.json' -delete
 python downstream/distill_family_study/scripts/submit_distill_study.py \
   --study-config downstream/distill_family_study/configs/study/staged_smoke_remaining_families_a100_1gpu.yaml \
   --manifest-dir "${MANIFEST_DIR}" \
+  --output-dir "${OUTPUT_DIR}" \
   --family deberta_v3 \
   --family qwen \
   --student-key deberta_v3_xsmall \
@@ -99,7 +107,7 @@ payload = json.load(open(sys.argv[1], "r", encoding="utf-8"))
 print(payload["run_name"])
 PY
   )
-  rm -rf "outputs/pipelines/${RUN_NAME}"
+  rm -rf "${OUTPUT_DIR}/pipelines/${RUN_NAME}"
   python downstream/distill_family_study/scripts/prefetch_family_hf_assets.py --run-spec "${RUN_SPEC_PATH}"
 done
 
@@ -116,7 +124,7 @@ PY
 
   python downstream/distill_family_study/scripts/run_materialized_distill_run.py --run-spec "${RUN_SPEC_PATH}"
 
-  QUEUE_PATH=$(find "outputs/pipelines/${RUN_NAME}" -path '*/analysis_queue.jsonl' | sort | head -n 1 || true)
+  QUEUE_PATH=$(find "${OUTPUT_DIR}/pipelines/${RUN_NAME}" -path '*/analysis_queue.jsonl' | sort | head -n 1 || true)
   if [[ -z "${QUEUE_PATH}" || ! -f "${QUEUE_PATH}" ]]; then
     echo "ERROR: expected analysis queue at ${QUEUE_PATH}"
     exit 2
