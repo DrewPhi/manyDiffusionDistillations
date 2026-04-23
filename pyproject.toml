@@ -119,6 +119,13 @@ testpaths = ["tests", "manylatents"]
 markers = [
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
 ]
+# Deprecation: manylatents/pipeline/ is being removed in a follow-up release.
+# Suppress its own DeprecationWarning on import so existing tests/pipeline/ cases
+# don't fail strict-warning runs during the migration. Remove this entry when
+# manylatents/pipeline/ is deleted.
+filterwarnings = [
+    "ignore::DeprecationWarning:manylatents.pipeline",
+]
 
 [[tool.uv.dependency-metadata]]
 name = "archetypes"
