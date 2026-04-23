@@ -13,6 +13,18 @@ Hydra instantiation configs (algorithm, data, metric, callback YAMLs) belong her
 
 **Do NOT push** experiment configs (sweep definitions), analysis scripts, data prep scripts, or project-specific sweeps. Those belong in the downstream repo that consumes manylatents (expaper repos, practitioner repos, etc.) — each has its own `experiments/configs/manylatents/experiment/` directory and a local manylatents pin.
 
+### Deprecated: `manylatents/pipeline/`
+
+`manylatents/pipeline/` contains experiment-orchestration code (distillation sweeps, PHATE-aligned target stages, probe extraction stages) that violates the scope above — it is project-specific orchestration living inside the library. It is **deprecated** and will be removed in a follow-up release. Imports still work but emit `DeprecationWarning` on module load.
+
+Migration targets for the distillation use case:
+- `manylatents/lightning/activation_snapshot.py` — `ActivationSnapshot` + `ActivationSnapshot.from_model(...)` for frozen per-layer activation capture
+- `manylatents/algorithms/lightning/distillation.py` — `Distillation` LightningModule (student training with optional alignment regularizer)
+- `manylatents/algorithms/lightning/phase1_align.py` — `align_on_snapshot(...)` imperative alignment pre-pass (not wrapped in `trainer.fit`)
+- `manylatents/callbacks/staged_training.py` — `StagedTrainingCallback` for phase2 → phase3 freeze/unfreeze transitions
+
+Consumer-repo orchestration (sweep launchers, 4-pack dispatchers, cluster configs) is not part of manylatents core.
+
 ## Pre-push checklist
 
 **CI must pass before pushing to main.** Run:
