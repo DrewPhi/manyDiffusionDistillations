@@ -23,12 +23,9 @@ fi
 cd "${REPO_ROOT}"
 export PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}"
 
-module load miniconda
-export PS1=""
 set +u
-source "$(conda info --base)/etc/profile.d/conda.sh"
+source "${REPO_ROOT}/.venv/bin/activate"
 set -u
-conda activate manylatents
 
 export WANDB_ENTITY=${WANDB_ENTITY:-cesar-valdez-mcgill-university}
 export WANDB_PROJECT=${WANDB_PROJECT:-diffusion-distillation}
