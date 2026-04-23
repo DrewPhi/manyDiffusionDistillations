@@ -46,6 +46,16 @@ class StagedTrainingCallback(Callback):
         dot-boundary (see :func:`_matches`). Trailing dots on each prefix are
         stripped on construction so ``"bert.encoder.layer.1"`` and
         ``"bert.encoder.layer.1."`` behave identically.
+
+        **Important**: prefixes match the LightningModule's parameter names,
+        which include any nested-module attribute prefix. If your module holds
+        the actual trainable model as ``self.student = <hf_model>`` (as
+        :class:`~manylatents.algorithms.lightning.distillation.Distillation`
+        does), then the callback sees names like ``"student.bert.encoder..."``
+        - so your prefix must include the ``"student."`` prefix too. This is
+        an honest consequence of PyTorch's ``Module.named_parameters()``
+        semantic; the callback has no way to know which attribute holds "the
+        real model" and refuses to guess.
     """
 
     def __init__(
