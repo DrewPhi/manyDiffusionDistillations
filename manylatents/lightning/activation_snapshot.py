@@ -22,6 +22,7 @@ on the snapshot side and document the rest.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Dict, List
 
 import torch
@@ -29,7 +30,12 @@ from torch import Tensor
 
 from manylatents.lightning.hooks import VALID_REDUCE
 
-__all__ = ["ActivationSnapshot"]
+__all__ = ["ActivationSnapshot", "SNAPSHOT_SCHEMA_VERSION"]
+
+# Bump when the on-disk format changes incompatibly. `load` rejects unknown
+# versions rather than silently mis-deserializing. Migration paths (if any) go
+# inside `load` keyed on the version field.
+SNAPSHOT_SCHEMA_VERSION: int = 1
 
 
 @dataclass(frozen=True)
@@ -96,3 +102,54 @@ class ActivationSnapshot:
 
     def __len__(self) -> int:
         return self.input_ids.shape[0]
+
+    def save(self, path: Path | str) -> None:
+        """Serialize to disk as a single ``torch.save`` blob.
+
+        The on-disk format is a versioned dict. ``load`` validates the version
+        and reconstructs the dataclass (re-triggering ``__post_init__``).
+        """
+        torch.save(
+            {
+                "_version": SNAPSHOT_SCHEMA_VERSION,
+                "input_ids": self.input_ids,
+                "attention_mask": self.attention_mask,
+                "sample_ids": list(self.sample_ids),
+                "activations": dict(self.activations),
+                "reduction": self.reduction,
+            },
+            str(path),
+        )
+
+    @classmethod
+    def load(cls, path: Path | str) -> "ActivationSnapshot":
+        """Load a snapshot previously written by ``save``.
+
+        Raises:
+            ValueError: if the file's ``_version`` does not match
+                ``SNAPSHOT_SCHEMA_VERSION`` or the dict is missing required keys.
+        """
+        blob = torch.load(str(path), map_location="cpu", weights_only=False)
+        if not isinstance(blob, dict):
+            raise ValueError(
+                f"expected a dict at {path!s}, got {type(blob).__name__}"
+            )
+        version = blob.get("_version")
+        if version != SNAPSHOT_SCHEMA_VERSION:
+            raise ValueError(
+                f"unknown ActivationSnapshot schema _version={version!r} at "
+                f"{path!s}; this build expects {SNAPSHOT_SCHEMA_VERSION}"
+            )
+        required = {"input_ids", "attention_mask", "sample_ids", "activations", "reduction"}
+        missing = required - blob.keys()
+        if missing:
+            raise ValueError(
+                f"malformed snapshot at {path!s}: missing keys {sorted(missing)}"
+            )
+        return cls(
+            input_ids=blob["input_ids"],
+            attention_mask=blob["attention_mask"],
+            sample_ids=list(blob["sample_ids"]),
+            activations=dict(blob["activations"]),
+            reduction=blob["reduction"],
+        )

@@ -1,10 +1,13 @@
-"""Unit tests for ActivationSnapshot invariants."""
+"""Unit tests for ActivationSnapshot invariants and save/load."""
 from __future__ import annotations
 
 import pytest
 import torch
 
-from manylatents.lightning.activation_snapshot import ActivationSnapshot
+from manylatents.lightning.activation_snapshot import (
+    ActivationSnapshot,
+    SNAPSHOT_SCHEMA_VERSION,
+)
 
 
 def _make_valid_fields(n: int = 4, seq_len: int = 8, hidden: int = 16):
@@ -102,3 +105,80 @@ def test_frozen_cannot_mutate() -> None:
     snap = ActivationSnapshot(**_make_valid_fields())
     with pytest.raises((AttributeError, Exception)):
         snap.reduction = "cls"  # type: ignore[misc]
+
+
+def test_save_load_roundtrip(tmp_path) -> None:
+    fields = _make_valid_fields(n=5, hidden=8)
+    fields["input_ids"] = torch.randint(0, 100, (5, 8), dtype=torch.long)
+    fields["sample_ids"] = [10, 20, 30, 40, 50]
+    fields["activations"] = {
+        "encoder.layer.0": torch.randn(5, 8),
+        "encoder.layer.11": torch.randn(5, 8),
+    }
+    snap = ActivationSnapshot(**fields)
+
+    path = tmp_path / "snap.pt"
+    snap.save(path)
+    loaded = ActivationSnapshot.load(path)
+
+    assert torch.equal(loaded.input_ids, snap.input_ids)
+    assert torch.equal(loaded.attention_mask, snap.attention_mask)
+    assert loaded.sample_ids == snap.sample_ids
+    assert loaded.reduction == snap.reduction
+    assert set(loaded.activations.keys()) == set(snap.activations.keys())
+    for k in snap.activations:
+        assert torch.equal(loaded.activations[k], snap.activations[k])
+
+
+def test_save_accepts_str_path(tmp_path) -> None:
+    snap = ActivationSnapshot(**_make_valid_fields())
+    path_str = str(tmp_path / "snap.pt")
+    snap.save(path_str)
+    loaded = ActivationSnapshot.load(path_str)
+    assert len(loaded) == len(snap)
+
+
+def test_load_rejects_unknown_version(tmp_path) -> None:
+    path = tmp_path / "future.pt"
+    snap = ActivationSnapshot(**_make_valid_fields())
+    blob = {
+        "_version": SNAPSHOT_SCHEMA_VERSION + 99,
+        "input_ids": snap.input_ids,
+        "attention_mask": snap.attention_mask,
+        "sample_ids": snap.sample_ids,
+        "activations": snap.activations,
+        "reduction": snap.reduction,
+    }
+    torch.save(blob, str(path))
+    with pytest.raises(ValueError, match=r"unknown ActivationSnapshot schema _version"):
+        ActivationSnapshot.load(path)
+
+
+def test_load_rejects_missing_keys(tmp_path) -> None:
+    path = tmp_path / "malformed.pt"
+    torch.save({"_version": SNAPSHOT_SCHEMA_VERSION, "input_ids": torch.zeros(2, 4)}, str(path))
+    with pytest.raises(ValueError, match=r"missing keys"):
+        ActivationSnapshot.load(path)
+
+
+def test_load_rejects_non_dict(tmp_path) -> None:
+    path = tmp_path / "weird.pt"
+    torch.save(torch.zeros(3), str(path))
+    with pytest.raises(ValueError, match=r"expected a dict"):
+        ActivationSnapshot.load(path)
+
+
+def test_load_validates_on_read(tmp_path) -> None:
+    """A dict with valid schema but broken invariants should raise __post_init__."""
+    path = tmp_path / "broken.pt"
+    blob = {
+        "_version": SNAPSHOT_SCHEMA_VERSION,
+        "input_ids": torch.zeros(4, 8, dtype=torch.long),
+        "attention_mask": torch.ones(4, 8, dtype=torch.long),
+        "sample_ids": [0, 1, 1, 2],  # duplicate — __post_init__ should reject
+        "activations": {"encoder.layer.0": torch.zeros(4, 16)},
+        "reduction": "mean",
+    }
+    torch.save(blob, str(path))
+    with pytest.raises(ValueError, match=r"unique"):
+        ActivationSnapshot.load(path)
