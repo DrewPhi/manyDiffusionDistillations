@@ -231,9 +231,23 @@ class Distillation(LightningModule):
         )
         return total
 
+    def _sample_probe_indices(self) -> Tensor:
+        """Draw ``alignment_batch_size`` unique indices (or fewer if the probe
+        set is smaller) uniformly at random on each call. Uses
+        :func:`torch.randperm`, seeded by PyTorch's global RNG - callers who
+        need reproducibility should ``torch.manual_seed`` upstream or inside
+        a subclass override.
+        """
+        n_probe = int(self._probe_input_ids.shape[0])
+        k = min(self.alignment_batch_size, n_probe)
+        # randperm lives on the same device as the probe buffer (CUDA when
+        # moved), so we don't induce a host-device sync per step.
+        perm = torch.randperm(n_probe, device=self._probe_input_ids.device)
+        return perm[:k]
+
     def _alignment_loss(self) -> Tensor:
-        """Compute MSE between student activations and the snapshot's
-        pre-pooled targets, over a randomly sampled probe mini-batch.
+        """Compute weighted MSE between student activations and the snapshot's
+        pre-pooled targets over a randomly sampled probe mini-batch.
 
         Uses ``ActivationExtractor.capture`` as a per-call context manager so
         hooks are registered only for the duration of this method and torn
@@ -243,10 +257,37 @@ class Distillation(LightningModule):
         Reduction matches ``self.snapshot.reduction``; the snapshot is the
         single source of truth for how activations were pooled.
         """
-        raise NotImplementedError(
-            "alignment path lands in the next commit; alignment_weight must "
-            "be 0 until then"
-        )
+        specs = [
+            LayerSpec(path=pair["student"], reduce=self.snapshot.reduction)
+            for pair in self.layer_pairs
+        ]
+        extractor = ActivationExtractor(specs, detach=False)
+
+        idx = self._sample_probe_indices()
+        probe_ids = self._probe_input_ids[idx]
+        probe_mask = self._probe_attention_mask[idx]
+
+        with extractor.capture(self.student):
+            # No labels - we only want the forward activations. Some student
+            # interfaces require `labels` for loss computation; omitting it
+            # means `outputs.loss` is None, which is fine since we discard the
+            # return value.
+            self.student(input_ids=probe_ids, attention_mask=probe_mask)
+
+        student_acts = extractor.get_activations()
+
+        total = torch.zeros((), device=self._probe_input_ids.device, dtype=torch.float32)
+        for pair in self.layer_pairs:
+            student_path = pair["student"]
+            teacher_path = pair["teacher"]
+            weight = float(pair.get("weight", 1.0))
+
+            buffer_name = self._layer_buffer_names[teacher_path]
+            target = getattr(self, buffer_name)[idx]
+            live = student_acts[student_path]
+            total = total + weight * ((live - target.to(live.dtype)) ** 2).mean()
+
+        return total
 
     def configure_optimizers(self) -> Any:
         lr = float(

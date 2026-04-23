@@ -289,23 +289,212 @@ def test_snapshot_property_returns_input() -> None:
     assert mod.snapshot.reduction == "mean"
 
 
-def test_alignment_path_raises_not_implemented_in_step_6() -> None:
-    """The alignment regularizer lands in the next commit. Constructing with
-    alignment_weight>0 is fine; calling training_step with it currently raises
-    a clear NotImplementedError. This test locks that contract."""
+# ---- Alignment path (step 7) -------------------------------------------------
+
+
+def _make_snapshot_for_layers(
+    student: _TinyLMStudent, layer_paths: list, n: int = 4
+) -> ActivationSnapshot:
+    """Build a snapshot from the student itself at the requested layers.
+
+    Using the student as its own 'teacher' gives us a snapshot whose targets
+    exactly equal what the student would produce at init, which lets us
+    assert the alignment loss is near-zero on the first step.
+    """
+    torch.manual_seed(0)
+    input_ids = torch.randint(0, 100, (n, 6), dtype=torch.long)
+    attention_mask = torch.ones(n, 6, dtype=torch.long)
+    return ActivationSnapshot.from_model(
+        student,
+        input_ids=input_ids,
+        attention_mask=attention_mask,
+        sample_ids=list(range(n)),
+        layer_paths=layer_paths,
+        reduction="mean",
+        batch_size=4,
+    )
+
+
+def test_training_step_with_alignment_adds_term() -> None:
+    """Total loss with alignment_weight=1.0 must strictly exceed the task loss
+    alone (the alignment MSE is > 0 for a freshly-initialized student against
+    a target built from a DIFFERENT model seed)."""
+    torch.manual_seed(42)
+    student_a = _TinyLMStudent()
+    # Build snapshot from a DIFFERENT model so align MSE is nonzero.
+    teacher = _TinyLMStudent()
+    snap = _make_snapshot_for_layers(teacher, ["layers.1"])
+
+    mod = Distillation(
+        datamodule=None,
+        student=student_a,
+        activation_snapshot=snap,
+        layer_pairs=[{"student": "layers.1", "teacher": "layers.1", "weight": 1.0}],
+        optimizer={"learning_rate": 1e-3},
+        alignment_weight=1.0,
+        alignment_batch_size=4,
+    )
+    batch = _make_task_batch()
+
+    torch.manual_seed(0)
+    total = mod.training_step(batch, batch_idx=0)
+
+    with torch.no_grad():
+        raw_task = mod(**batch).loss
+    assert total.detach() > raw_task.detach(), (
+        f"total ({total.item()}) should exceed task ({raw_task.item()}) "
+        f"when alignment MSE > 0"
+    )
+
+
+def test_alignment_loss_zero_when_student_matches_teacher() -> None:
+    """Snapshot built FROM the student at initialization → alignment MSE ≈ 0
+    on first call. Validates the reduction+layer-lookup plumbing end-to-end.
+    """
+    torch.manual_seed(99)
     student = _TinyLMStudent()
-    snap = _make_snapshot()
+    snap = _make_snapshot_for_layers(student, ["layers.1"])
+
     mod = Distillation(
         datamodule=None,
         student=student,
         activation_snapshot=snap,
-        layer_pairs=[{"student": "layers.0", "teacher": "layers.1", "weight": 1.0}],
+        layer_pairs=[{"student": "layers.1", "teacher": "layers.1", "weight": 1.0}],
         optimizer={"learning_rate": 1e-3},
         alignment_weight=1.0,
+        alignment_batch_size=4,
+    )
+    align = mod._alignment_loss()
+    assert align.item() < 1e-6, f"expected ≈0, got {align.item()}"
+
+
+def test_alignment_loss_no_lingering_hooks() -> None:
+    """After _alignment_loss returns, no forward hooks should remain on any
+    submodule of the student. This is the critical guard against the prior
+    refactor's memory-bloat / gradient-corruption failure mode.
+    """
+    student = _TinyLMStudent()
+    snap = _make_snapshot_for_layers(student, ["layers.1"])
+    mod = Distillation(
+        datamodule=None,
+        student=student,
+        activation_snapshot=snap,
+        layer_pairs=[{"student": "layers.1", "teacher": "layers.1", "weight": 1.0}],
+        optimizer={"learning_rate": 1e-3},
+        alignment_weight=1.0,
+        alignment_batch_size=4,
+    )
+    mod._alignment_loss()
+    for m in student.modules():
+        assert len(m._forward_hooks) == 0, (
+            f"lingering hook on {type(m).__name__}"
+        )
+
+
+def test_alignment_loss_does_not_leak_memory_across_steps() -> None:
+    """50 consecutive _alignment_loss calls should not monotonically grow
+    the number of registered hooks. (A full memory-RSS test is noisy on CI;
+    hook-count is the clean proxy for the actual concern.)
+    """
+    student = _TinyLMStudent()
+    snap = _make_snapshot_for_layers(student, ["layers.1"])
+    mod = Distillation(
+        datamodule=None,
+        student=student,
+        activation_snapshot=snap,
+        layer_pairs=[{"student": "layers.1", "teacher": "layers.1", "weight": 1.0}],
+        optimizer={"learning_rate": 1e-3},
+        alignment_weight=1.0,
+        alignment_batch_size=4,
+    )
+    for _ in range(50):
+        mod._alignment_loss()
+    total_hooks = sum(len(m._forward_hooks) for m in student.modules())
+    assert total_hooks == 0, f"hooks accumulated: total={total_hooks}"
+
+
+def test_alignment_loss_respects_pair_weights() -> None:
+    """Doubling a layer pair's weight should double the contribution of that
+    layer's MSE to the total alignment loss."""
+    student = _TinyLMStudent()
+    teacher = _TinyLMStudent()
+    snap = _make_snapshot_for_layers(teacher, ["layers.0", "layers.1"])
+
+    def build(w0: float, w1: float) -> Distillation:
+        return Distillation(
+            datamodule=None,
+            student=student,
+            activation_snapshot=snap,
+            layer_pairs=[
+                {"student": "layers.0", "teacher": "layers.0", "weight": w0},
+                {"student": "layers.1", "teacher": "layers.1", "weight": w1},
+            ],
+            optimizer={"learning_rate": 1e-3},
+            alignment_weight=1.0,
+            alignment_batch_size=4,
+        )
+
+    torch.manual_seed(0)
+    loss_equal = build(1.0, 1.0)._alignment_loss().item()
+    torch.manual_seed(0)
+    loss_doubled = build(2.0, 2.0)._alignment_loss().item()
+    assert loss_doubled == pytest.approx(2 * loss_equal, rel=1e-5)
+
+
+def test_alignment_loss_reads_reduction_from_snapshot() -> None:
+    """Changing snapshot.reduction must change which pooling the student
+    forward uses - verify by comparing cls vs mean snapshots."""
+    student = _TinyLMStudent()
+    teacher = _TinyLMStudent()
+
+    torch.manual_seed(0)
+    ids = torch.randint(0, 100, (4, 6), dtype=torch.long)
+    mask = torch.ones_like(ids)
+    snap_mean = ActivationSnapshot.from_model(
+        teacher, ids, mask, [0, 1, 2, 3], ["layers.1"], reduction="mean"
+    )
+    snap_cls = ActivationSnapshot.from_model(
+        teacher, ids, mask, [0, 1, 2, 3], ["layers.1"], reduction="cls"
+    )
+
+    def loss_for(snap):
+        mod = Distillation(
+            datamodule=None,
+            student=student,
+            activation_snapshot=snap,
+            layer_pairs=[{"student": "layers.1", "teacher": "layers.1", "weight": 1.0}],
+            optimizer={"learning_rate": 1e-3},
+            alignment_weight=1.0,
+            alignment_batch_size=4,
+        )
+        torch.manual_seed(0)
+        return mod._alignment_loss().item()
+
+    assert loss_for(snap_mean) != pytest.approx(loss_for(snap_cls), rel=1e-3), (
+        "mean and cls reductions must produce different alignment losses"
+    )
+
+
+def test_training_step_alignment_path_differentiable() -> None:
+    """The full training_step with alignment must produce a loss that
+    backprops cleanly (no detach, no broken graph)."""
+    student = _TinyLMStudent()
+    teacher = _TinyLMStudent()
+    snap = _make_snapshot_for_layers(teacher, ["layers.1"])
+    mod = Distillation(
+        datamodule=None,
+        student=student,
+        activation_snapshot=snap,
+        layer_pairs=[{"student": "layers.1", "teacher": "layers.1", "weight": 0.5}],
+        optimizer={"learning_rate": 1e-3},
+        alignment_weight=1.0,
+        alignment_batch_size=4,
     )
     batch = _make_task_batch()
-    with pytest.raises(NotImplementedError, match=r"alignment path lands"):
-        mod.training_step(batch, batch_idx=0)
+    loss = mod.training_step(batch, batch_idx=0)
+    loss.backward()
+    # Verify at least one student param received a gradient.
+    assert any(p.grad is not None and torch.any(p.grad != 0) for p in student.parameters())
 
 
 def test_setup_seeds_deterministically() -> None:
