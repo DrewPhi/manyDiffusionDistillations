@@ -23,12 +23,17 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Optional, Sequence
 
 import torch
+import torch.nn as nn
 from torch import Tensor
 
-from manylatents.lightning.hooks import VALID_REDUCE
+from manylatents.lightning.hooks import (
+    VALID_REDUCE,
+    ActivationExtractor,
+    LayerSpec,
+)
 
 __all__ = ["ActivationSnapshot", "SNAPSHOT_SCHEMA_VERSION"]
 
@@ -119,6 +124,101 @@ class ActivationSnapshot:
                 "reduction": self.reduction,
             },
             str(path),
+        )
+
+    @classmethod
+    def from_model(
+        cls,
+        model: nn.Module,
+        input_ids: Tensor,
+        attention_mask: Tensor,
+        sample_ids: Sequence[int],
+        layer_paths: Sequence[str],
+        *,
+        reduction: str = "mean",
+        batch_size: int = 8,
+        device: Optional[str] = None,
+    ) -> "ActivationSnapshot":
+        """Run ``model`` over ``(input_ids, attention_mask)`` and capture
+        activations at every path in ``layer_paths`` using ``reduction``.
+
+        This is the bridge between :class:`ActivationExtractor` (per-step hook
+        machinery) and a frozen snapshot. Model is run in eval + no_grad; hooks
+        are installed for exactly the duration of the batch loop and removed
+        on exit (via the extractor's context manager).
+
+        Args:
+            model: the model to forward. Will be put in eval mode for the call
+                and restored to its prior training mode on return.
+            input_ids: (N, L) long tensor of token ids.
+            attention_mask: (N, L) long tensor of attention mask values.
+            sample_ids: length-N sequence of unique integer ids. See the
+                class docstring for the consumer-side contract.
+            layer_paths: dotted paths to capture activations at. Resolution
+                uses :func:`manylatents.lightning.hooks.resolve_layer`, which
+                handles HF-family aliases (transformer.h <-> gpt_neox.layers
+                <-> model.layers). Every path must resolve to a module on
+                ``model``.
+            reduction: single pooling strategy applied to every captured
+                tensor. Must be one of ``VALID_REDUCE``. Per-layer reductions
+                are deliberately not supported — build multiple snapshots.
+            batch_size: forward-pass batch size. Does not change the result.
+            device: if given, move ``model``, ``input_ids``, and
+                ``attention_mask`` to this device before running. Outputs end
+                up on ``device``. If ``None``, runs wherever the inputs are.
+
+        Returns:
+            A frozen :class:`ActivationSnapshot` carrying the pooled
+            activations keyed by layer path.
+        """
+        if reduction not in VALID_REDUCE:
+            raise ValueError(
+                f"reduction must be one of {VALID_REDUCE}, got {reduction!r}"
+            )
+
+        n = input_ids.shape[0]
+        if attention_mask.shape[0] != n:
+            raise ValueError(
+                f"attention_mask.shape[0] ({attention_mask.shape[0]}) must "
+                f"equal input_ids.shape[0] ({n})"
+            )
+        if len(sample_ids) != n:
+            raise ValueError(
+                f"len(sample_ids) ({len(sample_ids)}) must equal "
+                f"input_ids.shape[0] ({n})"
+            )
+
+        prior_training = model.training
+        model.eval()
+        try:
+            if device is not None:
+                model = model.to(device)
+                input_ids = input_ids.to(device)
+                attention_mask = attention_mask.to(device)
+
+            specs = [LayerSpec(path=p, reduce=reduction) for p in layer_paths]
+            extractor = ActivationExtractor(specs, detach=True)
+
+            with torch.no_grad():
+                with extractor.capture(model):
+                    for start in range(0, n, batch_size):
+                        end = min(start + batch_size, n)
+                        model(
+                            input_ids=input_ids[start:end],
+                            attention_mask=attention_mask[start:end],
+                        )
+
+            activations = extractor.get_activations()
+        finally:
+            if prior_training:
+                model.train()
+
+        return cls(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            sample_ids=list(sample_ids),
+            activations=activations,
+            reduction=reduction,
         )
 
     @classmethod
