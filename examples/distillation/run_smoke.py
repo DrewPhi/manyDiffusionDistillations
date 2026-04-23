@@ -45,7 +45,13 @@ from manylatents.lightning.activation_snapshot import ActivationSnapshot
 
 
 TEACHER_NAME = "bert-large-uncased"
-STUDENT_NAME = "bert-base-uncased"
+# Student uses the same arch as teacher (random init via AutoConfig).
+# Real distillation typically has student_hidden < teacher_hidden with a
+# linear projection between them, but that's a feature for a later PR.
+# For this structural smoke, matching dims lets us validate the pipeline
+# end-to-end without adding a projector. bert-base-uncased would work too
+# if its weights were cached on tamia, but they aren't.
+STUDENT_NAME = "bert-large-uncased"
 MAX_LENGTH = 128
 PROBE_N = 32
 PHASE1_STEPS = 20
