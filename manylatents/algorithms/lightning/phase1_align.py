@@ -30,6 +30,21 @@ from manylatents.lightning.hooks import ActivationExtractor, LayerSpec, resolve_
 __all__ = ["align_on_snapshot"]
 
 
+def _device_matches(tensor_device: torch.device, expected: torch.device) -> bool:
+    """Compare devices respecting torch's "unspecified index" semantic.
+
+    ``torch.device("cuda")`` has ``index=None`` and should match *any* cuda
+    index. ``torch.device("cuda:0")`` only matches cuda device 0. Same for
+    cpu/meta/mps. This matches how PyTorch itself handles missing indices in
+    ``Tensor.to(device)``.
+    """
+    if tensor_device.type != expected.type:
+        return False
+    if expected.index is None:
+        return True
+    return tensor_device.index == expected.index
+
+
 def _assert_snapshot_on_device(snap: ActivationSnapshot, device: torch.device) -> None:
     """Raise ValueError if any snapshot tensor is on a different device.
 
@@ -47,7 +62,8 @@ def _assert_snapshot_on_device(snap: ActivationSnapshot, device: torch.device) -
         tensors.append((f"activations[{path!r}]", acts))
 
     mismatches = [
-        (name, t.device) for name, t in tensors if t.device != device
+        (name, t.device) for name, t in tensors
+        if not _device_matches(t.device, device)
     ]
     if mismatches:
         raise ValueError(
