@@ -36,7 +36,7 @@ import torch
 import torch.nn.functional as F
 from lightning.pytorch import LightningDataModule, Trainer
 from torch.utils.data import DataLoader, TensorDataset
-from transformers import AutoModelForMaskedLM, AutoTokenizer
+from transformers import AutoConfig, AutoModelForMaskedLM, AutoTokenizer
 
 from manylatents.algorithms.lightning.distillation import Distillation
 from manylatents.algorithms.lightning.phase1_align import align_on_snapshot
@@ -159,10 +159,19 @@ def main() -> int:
     torch.cuda.empty_cache() if device == "cuda" else None
 
     # -- Student side ----------------------------------------------------------
-    student = AutoModelForMaskedLM.from_pretrained(STUDENT_NAME, local_files_only=True)
+    # Random-init bert-base from its architectural config (no weights needed).
+    # This matches real distillation practice - the student starts untrained
+    # and the alignment pass is part of its training. Also keeps us offline
+    # on tamia compute where bert-base weights aren't cached.
+    student_config = AutoConfig.from_pretrained(STUDENT_NAME, local_files_only=True)
+    student = AutoModelForMaskedLM.from_config(student_config)
     student.to(device)
     student_penult = _penultimate_layer_path(student.config.num_hidden_layers)
-    print(f"[smoke] student={STUDENT_NAME} penult={student_penult}", flush=True)
+    print(
+        f"[smoke] student={STUDENT_NAME} (from_config, random init) "
+        f"penult={student_penult}",
+        flush=True,
+    )
 
     layer_pairs = [
         {"student": student_penult, "teacher": teacher_penult, "weight": 1.0}
