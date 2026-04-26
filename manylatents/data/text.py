@@ -67,6 +67,8 @@ class TextDataConfig:
     dataloader_seed: Optional[int] = None
     split_index_cache_dir: Optional[str] = None
     train_subset_cache_dir: Optional[str] = None
+    streaming: bool = False
+    streaming_shuffle_buffer: int = 10_000
 
 
 class TextDataModule(LightningDataModule):
@@ -106,6 +108,8 @@ class TextDataModule(LightningDataModule):
         dataloader_seed: Optional[int] = None,
         split_index_cache_dir: Optional[str] = None,
         train_subset_cache_dir: Optional[str] = None,
+        streaming: bool = False,
+        streaming_shuffle_buffer: int = 10_000,
     ):
         super().__init__()
         self.dataset_name = dataset_name
@@ -136,6 +140,8 @@ class TextDataModule(LightningDataModule):
         self.dataloader_seed = dataloader_seed if dataloader_seed is not None else seed
         self.split_index_cache_dir = Path(split_index_cache_dir) if split_index_cache_dir else None
         self.train_subset_cache_dir = Path(train_subset_cache_dir) if train_subset_cache_dir else None
+        self.streaming = bool(streaming)
+        self.streaming_shuffle_buffer = int(streaming_shuffle_buffer)
 
         self.tokenizer = None
         self._mlm_collator = None
@@ -164,6 +170,8 @@ class TextDataModule(LightningDataModule):
         kwargs: Dict[str, object] = {}
         if self.dataset_revision is not None:
             kwargs["revision"] = self.dataset_revision
+        if self.streaming:
+            kwargs["streaming"] = True
 
         # Special-case local json/jsonl(.zst) directories used on cluster storage.
         if self.dataset_name == "json" and self.dataset_path is not None:
@@ -601,6 +609,111 @@ class TextDataModule(LightningDataModule):
 
         return tokenize_fn
 
+    def _setup_streaming(self, stage: Optional[str], tokenize_fn):
+        """Streaming setup: avoids mmap-RSS inflation that breaks DDP under
+        SLURM cgroups.
+
+        - Probe split: ``shuffle(buffer).take(N)`` materialized to a small
+          in-memory list (probe is rank-0 only via the runner's filesystem
+          share, so no DDP shard split here).
+        - Train split: ``filter`` empty texts, optional ``skip``/``take`` for
+          token-budget, ``shuffle(buffer)``, ``split_dataset_by_node`` so each
+          DDP rank consumes its own shard, then on-the-fly ``map(tokenize_fn)``.
+        - Val/test: same shape, no shard split (each rank evaluates the full
+          val set, Lightning aggregates).
+
+        Reproducibility caveats vs the mapped path:
+        - probe_source_ids are not meaningful (no canonical index); set to []
+        - train_subset cache and split_index cache are skipped — streaming
+          mode trades reproducibility-at-the-row-level for memory efficiency
+        """
+        from datasets import load_dataset
+        from datasets.distributed import split_dataset_by_node
+
+        load_args = self._dataset_load_args()
+        streamed = load_dataset(**load_args)
+        text_field = self.text_field
+
+        def _nonempty(ex):
+            return ex[text_field].strip() != ""
+
+        # ---- Probe (always materialize; small) -----------------------------
+        if stage in {"probe", "probe_only"} or stage is None or stage == "fit":
+            probe_n = int(self.probe_n_samples)
+            buf = max(probe_n * 4, min(self.streaming_shuffle_buffer, 4_000))
+            probe_streamed = (
+                streamed[self.probe_split]
+                .filter(_nonempty)
+                .shuffle(seed=int(self.seed), buffer_size=buf)
+                .take(probe_n)
+            )
+            probe_examples: list[Dict[str, torch.Tensor]] = []
+            for ex in probe_streamed:
+                tokens = tokenize_fn({text_field: [ex[text_field]]})
+                if not tokens.get("input_ids") is None and len(tokens["input_ids"]) == 0:
+                    continue
+                entry: Dict[str, torch.Tensor] = {
+                    "input_ids": tokens["input_ids"][0],
+                    "attention_mask": tokens["attention_mask"][0],
+                }
+                if "labels" in tokens:
+                    entry["labels"] = tokens["labels"][0]
+                probe_examples.append(entry)
+            self.probe_dataset = _ListDataset(probe_examples)
+            self.probe_source_ids = []
+            logger.info("Streaming probe materialized: %d examples", len(probe_examples))
+
+        if stage in {"probe", "probe_only"}:
+            self.train_dataset = None
+            self.val_dataset = None
+            self.test_dataset = None
+            return
+
+        # ---- Val / test (each rank streams full split) ----------------------
+        val_streamed = streamed[self.val_split].filter(_nonempty)
+        if self.val_example_limit is not None:
+            val_streamed = val_streamed.take(int(self.val_example_limit))
+        val_streamed = val_streamed.map(tokenize_fn, batched=True, remove_columns=[text_field])
+        self.val_dataset = _StreamingTorchDataset(val_streamed)
+
+        if self.test_split is not None and self.test_split in streamed:
+            test_streamed = streamed[self.test_split].filter(_nonempty)
+            if self.test_example_limit is not None:
+                test_streamed = test_streamed.take(int(self.test_example_limit))
+            test_streamed = test_streamed.map(tokenize_fn, batched=True, remove_columns=[text_field])
+            self.test_dataset = _StreamingTorchDataset(test_streamed)
+        else:
+            self.test_dataset = self.val_dataset
+
+        if stage in {"eval", "eval_only"}:
+            self.train_dataset = None
+            return
+
+        # ---- Train (DDP-sharded streaming) ---------------------------------
+        train_streamed = streamed[self.train_split].filter(_nonempty)
+        if self.train_example_offset > 0:
+            train_streamed = train_streamed.skip(int(self.train_example_offset))
+        if self.token_budget is not None:
+            if self.token_budget <= 0:
+                raise ValueError("token_budget must be > 0 when provided")
+            n_train_target = int(math.ceil(float(self.token_budget) / float(self.max_length)))
+            train_streamed = train_streamed.take(n_train_target)
+
+        train_streamed = train_streamed.shuffle(
+            seed=int(self.data_order_seed),
+            buffer_size=int(self.streaming_shuffle_buffer),
+        )
+
+        if torch.distributed.is_available() and torch.distributed.is_initialized():
+            world = torch.distributed.get_world_size()
+            rank = torch.distributed.get_rank()
+            if world > 1:
+                train_streamed = split_dataset_by_node(train_streamed, world_size=world, rank=rank)
+                logger.info("Streaming train split sharded for DDP: rank=%d/%d", rank, world)
+
+        train_streamed = train_streamed.map(tokenize_fn, batched=True, remove_columns=[text_field])
+        self.train_dataset = _StreamingTorchDataset(train_streamed)
+
     def _setup_probe_only(self, dataset, tokenize_fn):
         logger.info("Running probe-only datamodule setup for split='%s'", self.probe_split)
         self.train_dataset = None
@@ -679,9 +792,16 @@ class TextDataModule(LightningDataModule):
         else:
             self._mlm_collator = None
 
+        tokenize_fn = self._build_tokenize_fn()
+
+        if self.streaming:
+            logger.info("TextDataModule.setup(stage=%s) using streaming path", stage)
+            self._setup_streaming(stage, tokenize_fn)
+            logger.info("TextDataModule.setup(stage=%s) finished via streaming path", stage)
+            return
+
         logger.info("Loading raw dataset")
         dataset = self._load_raw_dataset()
-        tokenize_fn = self._build_tokenize_fn()
 
         if stage in {"probe", "probe_only"}:
             self._setup_probe_only(dataset, tokenize_fn)
@@ -773,10 +893,13 @@ class TextDataModule(LightningDataModule):
         if self.train_dataset is None:
             raise RuntimeError("train_dataset is not initialized; call setup() for training first")
         generator = torch.Generator().manual_seed(int(self.data_order_seed))
+        # Streaming IterableDataset is already shuffled + DDP-sharded inside
+        # the HF stream, so DataLoader must not request shuffle (would error).
+        is_streaming = isinstance(self.train_dataset, torch.utils.data.IterableDataset)
         return DataLoader(
             self.train_dataset,
             batch_size=self.batch_size,
-            shuffle=True,
+            shuffle=False if is_streaming else True,
             num_workers=self.num_workers,
             collate_fn=self._task_collate_fn,
             worker_init_fn=self._seed_worker,
@@ -900,3 +1023,43 @@ class TokenizedDataset(Dataset):
 
     def index_from_source_id(self, source_id: int) -> Optional[int]:
         return self._source_to_local.get(int(source_id))
+
+
+class _ListDataset(Dataset):
+    """Map-style dataset over an in-memory list of pre-tokenized examples.
+
+    Used for the probe split under streaming mode: the probe is small enough
+    to materialize, and downstream code (probe_dataloader, snapshot build)
+    expects a map-style dataset with ``__len__`` and ``__getitem__``.
+    """
+
+    def __init__(self, examples: list[Dict[str, torch.Tensor]]):
+        self.examples = list(examples)
+
+    def __len__(self) -> int:
+        return len(self.examples)
+
+    def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
+        return self.examples[idx]
+
+
+class _StreamingTorchDataset(torch.utils.data.IterableDataset):
+    """Wrap an HF ``IterableDataset`` for use with PyTorch ``DataLoader``.
+
+    Each yielded example is converted to a dict of torch tensors so the
+    existing ``_stack_collate_fn`` / ``_task_collate_fn`` paths work without
+    modification.
+    """
+
+    def __init__(self, hf_iterable):
+        self.hf_iterable = hf_iterable
+
+    def __iter__(self):
+        for ex in self.hf_iterable:
+            entry: Dict[str, torch.Tensor] = {
+                "input_ids": torch.as_tensor(ex["input_ids"]),
+                "attention_mask": torch.as_tensor(ex["attention_mask"]),
+            }
+            if "labels" in ex:
+                entry["labels"] = torch.as_tensor(ex["labels"])
+            yield entry
