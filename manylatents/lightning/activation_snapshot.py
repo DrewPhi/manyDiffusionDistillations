@@ -209,6 +209,26 @@ class ActivationSnapshot:
                         )
 
             activations = extractor.get_activations()
+
+            # masked_mean defers reduction past the hook (the hook can't see
+            # the attention mask). Apply it post-hook here, where we have the
+            # mask. Each captured tensor is (n, seq_len, hidden); mean over
+            # attended positions only -> (n, hidden).
+            if reduction == "masked_mean":
+                mask_f = attention_mask.to(dtype=torch.float32)  # (n, seq_len)
+                attended = mask_f.sum(dim=1, keepdim=True).clamp_min(1.0)  # (n, 1)
+                pooled: Dict[str, torch.Tensor] = {}
+                for path, acts in activations.items():
+                    if acts.dim() != 3 or acts.shape[1] != mask_f.shape[1]:
+                        raise ValueError(
+                            f"masked_mean expected per-token tensor with "
+                            f"shape (n, seq_len, hidden); got {tuple(acts.shape)} "
+                            f"for layer {path!r}"
+                        )
+                    mask_b = mask_f.to(acts.device, dtype=acts.dtype).unsqueeze(-1)
+                    masked_sum = (acts * mask_b).sum(dim=1)  # (n, hidden)
+                    pooled[path] = masked_sum / attended.to(acts.device, dtype=acts.dtype)
+                activations = pooled
         finally:
             if prior_training:
                 model.train()

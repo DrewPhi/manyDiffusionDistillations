@@ -8,7 +8,7 @@ import torch
 import torch.nn as nn
 from torch import Tensor
 
-VALID_REDUCE = ("mean", "last_token", "cls", "first_token", "all", "none")
+VALID_REDUCE = ("mean", "masked_mean", "last_token", "cls", "first_token", "all", "none")
 VALID_EXTRACTION_POINTS = ("output", "input", "hidden_states")
 
 
@@ -28,7 +28,7 @@ class LayerSpec:
     """
     path: str
     extraction_point: Literal["output", "input", "hidden_states"] = "output"
-    reduce: Literal["mean", "last_token", "cls", "first_token", "all", "none"] = "mean"
+    reduce: Literal["mean", "masked_mean", "last_token", "cls", "first_token", "all", "none"] = "mean"
 
     def __post_init__(self):
         if self.reduce not in VALID_REDUCE:
@@ -167,13 +167,23 @@ class ActivationExtractor:
         return hook
 
     def _reduce(self, tensor: Tensor, method: str) -> Tensor:
-        """Reduce sequence dimension."""
+        """Reduce sequence dimension.
+
+        ``masked_mean`` requires the attention mask, which the forward hook
+        does not have access to. The hook captures per-token (``reduce="all"``)
+        and ``ActivationSnapshot.from_model`` applies the mask post-hook.
+        """
         if method == "none" or tensor.dim() < 3:
             return tensor
 
         # Assume shape is (batch, seq_len, dim)
         if method == "mean":
             return tensor.mean(dim=1)
+        elif method == "masked_mean":
+            # Mask is not available inside the hook; defer reduction. Returning
+            # the full per-token tensor here lets ``from_model`` apply the
+            # mask after the forward pass.
+            return tensor
         elif method == "last_token":
             return tensor[:, -1, :]
         elif method in ("cls", "first_token"):
