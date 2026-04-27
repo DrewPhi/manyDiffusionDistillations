@@ -196,39 +196,61 @@ class ActivationSnapshot:
                 input_ids = input_ids.to(device)
                 attention_mask = attention_mask.to(device)
 
-            specs = [LayerSpec(path=p, reduce=reduction) for p in layer_paths]
-            extractor = ActivationExtractor(specs, detach=True)
-
-            with torch.no_grad():
-                with extractor.capture(model):
-                    for start in range(0, n, batch_size):
-                        end = min(start + batch_size, n)
-                        model(
-                            input_ids=input_ids[start:end],
-                            attention_mask=attention_mask[start:end],
-                        )
-
-            activations = extractor.get_activations()
-
-            # masked_mean defers reduction past the hook (the hook can't see
-            # the attention mask). Apply it post-hook here, where we have the
-            # mask. Each captured tensor is (n, seq_len, hidden); mean over
-            # attended positions only -> (n, hidden).
+            # masked_mean must apply the reduction per batch and accumulate
+            # only the (B, hidden) result, not the (B, seq, hidden) per-token
+            # tensor. Otherwise extractor.get_activations() concatenates full
+            # per-token across batches and OOMs on GPU at production probe
+            # sizes (e.g., n=2048, seq=1024, hidden=4096 = 16GB per layer
+            # before concat, alongside a 14GB teacher).
             if reduction == "masked_mean":
-                mask_f = attention_mask.to(dtype=torch.float32)  # (n, seq_len)
-                attended = mask_f.sum(dim=1, keepdim=True).clamp_min(1.0)  # (n, 1)
-                pooled: Dict[str, torch.Tensor] = {}
-                for path, acts in activations.items():
-                    if acts.dim() != 3 or acts.shape[1] != mask_f.shape[1]:
-                        raise ValueError(
-                            f"masked_mean expected per-token tensor with "
-                            f"shape (n, seq_len, hidden); got {tuple(acts.shape)} "
-                            f"for layer {path!r}"
-                        )
-                    mask_b = mask_f.to(acts.device, dtype=acts.dtype).unsqueeze(-1)
-                    masked_sum = (acts * mask_b).sum(dim=1)  # (n, hidden)
-                    pooled[path] = masked_sum / attended.to(acts.device, dtype=acts.dtype)
-                activations = pooled
+                specs = [LayerSpec(path=p, reduce="none") for p in layer_paths]
+                extractor = ActivationExtractor(specs, detach=True)
+                pooled_chunks: Dict[str, List[torch.Tensor]] = {p: [] for p in layer_paths}
+
+                with torch.no_grad():
+                    with extractor.capture(model):
+                        for start in range(0, n, batch_size):
+                            end = min(start + batch_size, n)
+                            model(
+                                input_ids=input_ids[start:end],
+                                attention_mask=attention_mask[start:end],
+                            )
+                            # Per-batch: extract per-token, mask-mean, store
+                            # (b, hidden) only. clear=True frees the per-token
+                            # buffer before next batch.
+                            batch_acts = extractor.get_activations(clear=True)
+                            mask_b = attention_mask[start:end]
+                            for path in layer_paths:
+                                acts = batch_acts.get(path)
+                                if acts is None:
+                                    continue
+                                if acts.dim() != 3:
+                                    raise ValueError(
+                                        f"masked_mean expected per-token (b, seq, hidden); "
+                                        f"got {tuple(acts.shape)} for layer {path!r}"
+                                    )
+                                mb = mask_b.to(acts.device, dtype=acts.dtype).unsqueeze(-1)
+                                masked_sum = (acts * mb).sum(dim=1)
+                                attended = mb.sum(dim=1).clamp_min(1.0)
+                                pooled_chunks[path].append(masked_sum / attended)
+
+                activations = {
+                    p: torch.cat(chunks, dim=0)
+                    for p, chunks in pooled_chunks.items() if chunks
+                }
+            else:
+                specs = [LayerSpec(path=p, reduce=reduction) for p in layer_paths]
+                extractor = ActivationExtractor(specs, detach=True)
+
+                with torch.no_grad():
+                    with extractor.capture(model):
+                        for start in range(0, n, batch_size):
+                            end = min(start + batch_size, n)
+                            model(
+                                input_ids=input_ids[start:end],
+                                attention_mask=attention_mask[start:end],
+                            )
+                activations = extractor.get_activations()
         finally:
             if prior_training:
                 model.train()

@@ -447,6 +447,35 @@ def test_masked_mean_equals_unmasked_when_all_attended() -> None:
     )
 
 
+def test_masked_mean_streaming_equivalence_across_batch_sizes() -> None:
+    """masked_mean must apply the mask reduction per-batch (streaming) so it
+    avoids materializing the full (n, seq, hidden) tensor. Verify result is
+    invariant across batch_size choices."""
+    torch.manual_seed(33)
+    model = _TinyBertLike()
+    n, seq_len = 6, 5
+    input_ids = torch.randint(0, 100, (n, seq_len), dtype=torch.long)
+    sample_ids = list(range(100, 100 + n))
+    attention_mask = torch.ones(n, seq_len, dtype=torch.long)
+    # row 2 partially padded
+    attention_mask[2, 3:] = 0
+
+    snap_b1 = ActivationSnapshot.from_model(
+        model, input_ids, attention_mask, sample_ids,
+        ["layers.0"], reduction="masked_mean", batch_size=1,
+    )
+    snap_b2 = ActivationSnapshot.from_model(
+        model, input_ids, attention_mask, sample_ids,
+        ["layers.0"], reduction="masked_mean", batch_size=2,
+    )
+    snap_b6 = ActivationSnapshot.from_model(
+        model, input_ids, attention_mask, sample_ids,
+        ["layers.0"], reduction="masked_mean", batch_size=6,
+    )
+    assert torch.allclose(snap_b1.activations["layers.0"], snap_b2.activations["layers.0"], atol=1e-6)
+    assert torch.allclose(snap_b1.activations["layers.0"], snap_b6.activations["layers.0"], atol=1e-6)
+
+
 def test_masked_mean_differs_from_unmasked_when_padding_present() -> None:
     """With partial padding, masked_mean and mean must differ — and masked_mean
     must equal the manual mean over attended-only positions."""
