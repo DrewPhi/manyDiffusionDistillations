@@ -406,3 +406,83 @@ def test_from_model_rejects_sample_ids_length_mismatch() -> None:
             model, input_ids, attention_mask, [0, 1, 2],  # wrong length
             ["layers.0"], reduction="mean",
         )
+
+
+# ---- masked_mean --------------------------------------------------------------
+
+
+def test_from_model_masked_mean_shape() -> None:
+    """masked_mean produces (n, hidden) — same shape as mean."""
+    model = _TinyBertLike()
+    input_ids, attention_mask, sample_ids = _make_tiny_inputs(n=4, seq_len=6)
+    snap = ActivationSnapshot.from_model(
+        model, input_ids, attention_mask, sample_ids,
+        ["layers.0", "layers.1"], reduction="masked_mean",
+    )
+    assert snap.reduction == "masked_mean"
+    for path, t in snap.activations.items():
+        assert t.shape == (4, 8), f"{path}: {t.shape}"
+
+
+def test_masked_mean_equals_unmasked_when_all_attended() -> None:
+    """When attention_mask is all 1s, masked_mean and mean must agree."""
+    torch.manual_seed(13)
+    model = _TinyBertLike()
+    input_ids, attention_mask, sample_ids = _make_tiny_inputs(n=3, seq_len=5)
+    # all positions attended — mask=1 everywhere
+    assert (attention_mask == 1).all()
+
+    snap_mean = ActivationSnapshot.from_model(
+        model, input_ids, attention_mask, sample_ids,
+        ["layers.0"], reduction="mean",
+    )
+    snap_masked = ActivationSnapshot.from_model(
+        model, input_ids, attention_mask, sample_ids,
+        ["layers.0"], reduction="masked_mean",
+    )
+    assert torch.allclose(
+        snap_mean.activations["layers.0"],
+        snap_masked.activations["layers.0"],
+        atol=1e-6,
+    )
+
+
+def test_masked_mean_differs_from_unmasked_when_padding_present() -> None:
+    """With partial padding, masked_mean and mean must differ — and masked_mean
+    must equal the manual mean over attended-only positions."""
+    torch.manual_seed(101)
+    model = _TinyBertLike()
+    n, seq_len = 3, 6
+    input_ids, _, sample_ids = _make_tiny_inputs(n=n, seq_len=seq_len)
+    # Per-row padding pattern: row i has the last (i+1) positions padded.
+    attention_mask = torch.ones(n, seq_len, dtype=torch.long)
+    for i in range(n):
+        attention_mask[i, seq_len - (i + 1):] = 0
+    assert attention_mask.sum().item() < n * seq_len  # some padding
+
+    snap_mean = ActivationSnapshot.from_model(
+        model, input_ids, attention_mask, sample_ids,
+        ["layers.0"], reduction="mean",
+    )
+    snap_masked = ActivationSnapshot.from_model(
+        model, input_ids, attention_mask, sample_ids,
+        ["layers.0"], reduction="masked_mean",
+    )
+
+    # The two reductions must differ on this input.
+    assert not torch.allclose(
+        snap_mean.activations["layers.0"],
+        snap_masked.activations["layers.0"],
+        atol=1e-4,
+    )
+
+    # Compute the masked mean manually at layers.0's output and verify match.
+    model.eval()
+    with torch.no_grad():
+        x = model.embed(input_ids)
+        layer0_out = model.layers[0](x)  # (n, seq_len, h) — what hook captures
+    mask_f = attention_mask.float().unsqueeze(-1)  # (n, seq_len, 1)
+    expected = (layer0_out * mask_f).sum(dim=1) / mask_f.sum(dim=1).clamp_min(1.0)
+    assert torch.allclose(
+        snap_masked.activations["layers.0"], expected, atol=1e-6,
+    )
