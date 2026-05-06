@@ -139,6 +139,16 @@ class HFTrainerModule(LightningModule):
             )
             for key, value in (self.config.model_config_overrides or {}).items():
                 setattr(model_config, key, value)
+            # Force fp32 master weights at construction. Some HF configs ship
+            # `torch_dtype: float16` (e.g. EleutherAI/pythia-*), and modern
+            # transformers' `from_config` honors that field — building the
+            # student in pure fp16 will NaN once gradients flow under any
+            # mixed-precision regime. The optional post-construction
+            # `.to(dtype=normalized_torch_dtype)` below still lets callers
+            # downcast intentionally, but the construction-time dtype is now
+            # unconditionally fp32 regardless of what the source config or
+            # `model_config_overrides` carried.
+            model_config.torch_dtype = torch.float32
             from_config_kwargs: Dict[str, Any] = {
                 "trust_remote_code": self.config.trust_remote_code,
             }
