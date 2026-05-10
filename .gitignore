@@ -5,6 +5,7 @@
 /representationvisualizations/
 /scripts/outputs/
 /.codex/
+/study_manifests/
 
 # python cache files.
 __pycache__/
