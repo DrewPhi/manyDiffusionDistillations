@@ -148,8 +148,16 @@ def align_on_snapshot(
         weight_decay=weight_decay,
     )
 
+    # masked_mean requires the attention mask, which the hook does not see.
+    # Capture per-token (reduce="none") and apply the mask-aware mean inside
+    # the loop, where probe_mask is in scope. For other reductions we let the
+    # hook do its thing.
+    is_masked_mean = snapshot.reduction == "masked_mean"
     specs = [
-        LayerSpec(path=pair["student"], reduce=snapshot.reduction)
+        LayerSpec(
+            path=pair["student"],
+            reduce="none" if is_masked_mean else snapshot.reduction,
+        )
         for pair in layer_pairs
     ]
     extractor = ActivationExtractor(specs, detach=False)
@@ -180,6 +188,13 @@ def align_on_snapshot(
                     w = float(pair.get("weight", 1.0))
                     target = snapshot.activations[pair["teacher"]][idx]
                     live = student_acts[pair["student"]]
+                    if is_masked_mean:
+                        # Apply mask-aware mean to the student per-token tensor
+                        # so its shape (B, hidden) matches the snapshot target.
+                        mask_b = probe_mask.to(device=live.device, dtype=live.dtype).unsqueeze(-1)
+                        masked_sum = (live * mask_b).sum(dim=1)
+                        attended = mask_b.sum(dim=1).clamp_min(1.0)
+                        live = masked_sum / attended
                     total = total + w * ((live - target.to(live.dtype)) ** 2).mean()
 
                 total.backward()

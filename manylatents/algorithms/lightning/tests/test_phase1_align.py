@@ -233,3 +233,47 @@ def test_align_seed_variation_produces_different_losses() -> None:
     a = run(11)
     b = run(12)
     assert a != b, f"different seeds produced identical losses: {a}"
+
+
+def _build_masked_snapshot(n: int = 16, hidden: int = 8, seed: int = 0) -> ActivationSnapshot:
+    """Build a snapshot with reduction='masked_mean' over partially-padded inputs."""
+    torch.manual_seed(seed)
+    teacher = _TinyStudent(hidden=hidden)
+    seq_len = 6
+    input_ids = torch.randint(0, 100, (n, seq_len), dtype=torch.long)
+    # Per-row padding: rows 0..n-1 have decreasing attended length 6,5,4,3,...
+    attention_mask = torch.ones(n, seq_len, dtype=torch.long)
+    for i in range(n):
+        pad = i % seq_len
+        if pad > 0:
+            attention_mask[i, seq_len - pad:] = 0
+    return ActivationSnapshot.from_model(
+        teacher,
+        input_ids=input_ids,
+        attention_mask=attention_mask,
+        sample_ids=list(range(n)),
+        layer_paths=["layers.1"],
+        reduction="masked_mean",
+    )
+
+
+def test_align_runs_with_masked_mean_snapshot() -> None:
+    """align_on_snapshot must accept reduction='masked_mean' snapshots and
+    apply mask-aware mean to student outputs to match shape (B, hidden)."""
+    torch.manual_seed(42)
+    student = _TinyStudent()
+    snap = _build_masked_snapshot(seed=7)
+    assert snap.reduction == "masked_mean"
+    losses = align_on_snapshot(
+        student, snap, _default_pairs(),
+        n_steps=10,
+        optimizer_cfg={"learning_rate": 1e-2},
+        batch_size=4, seed=0, device="cpu",
+    )
+    assert len(losses) == 10
+    assert all(l == l for l in losses), "losses contain NaN"
+    assert all(l < float("inf") for l in losses), "losses contain inf"
+    # On a fresh student with masked-mean targets, loss should decrease.
+    assert losses[-1] < losses[0], (
+        f"masked_mean align did not decrease loss: first={losses[0]}, last={losses[-1]}"
+    )

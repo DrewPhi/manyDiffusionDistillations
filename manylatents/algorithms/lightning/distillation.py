@@ -179,6 +179,58 @@ class Distillation(LightningModule):
                         f"resolve on the provided student module: {exc}"
                     ) from exc
 
+    @classmethod
+    def from_spec(
+        cls,
+        spec: Mapping[str, Any],
+        *,
+        student: nn.Module,
+        activation_snapshot: ActivationSnapshot,
+        layer_pairs: List[Mapping[str, Any]],
+        datamodule: Any,
+        alignment_weight: float = 0.0,
+    ) -> "Distillation":
+        """Build a Distillation from a run-spec dict.
+
+        Reads ``spec["reproducibility"]["{optimizer, alignment, seeds, training, lr_scheduler}"]``
+        and maps them onto ``__init__`` kwargs.
+        """
+        repro = spec["reproducibility"]
+        opt = repro["optimizer"]
+        optimizer = {
+            "learning_rate": float(opt["learning_rate"]),
+            "weight_decay": float(opt["weight_decay"]),
+            "betas": tuple(opt["betas"]),
+            "eps": float(opt["eps"]),
+        }
+        training = repro["training"]
+        staged = training.get("staged_training") or {}
+        if bool(staged.get("enabled", False)):
+            total_steps = int(staged["phase2"]["max_steps"]) + int(
+                staged["phase3"]["max_steps"]
+            )
+        else:
+            total_steps = int(training["max_steps"])
+
+        lr_scheduler: Optional[Dict[str, Any]] = None
+        if "lr_scheduler" in repro:
+            lr_scheduler = {
+                "warmup_steps": int(repro["lr_scheduler"]["warmup_steps"]),
+                "total_steps": total_steps,
+            }
+
+        return cls(
+            datamodule=datamodule,
+            student=student,
+            activation_snapshot=activation_snapshot,
+            layer_pairs=list(layer_pairs),
+            optimizer=optimizer,
+            alignment_weight=float(alignment_weight),
+            alignment_batch_size=int(repro["alignment"]["batch_size"]),
+            init_seed=int(repro["seeds"]["global_seed"]),
+            lr_scheduler=lr_scheduler,
+        )
+
     @property
     def snapshot(self) -> ActivationSnapshot:
         """The frozen snapshot passed at construction. Reduction and other
