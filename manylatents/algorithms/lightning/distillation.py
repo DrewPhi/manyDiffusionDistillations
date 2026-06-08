@@ -63,6 +63,47 @@ def _logit_kl_loss(
     return (kl * mask).sum() / denom * (t * t)
 
 
+def _soft_diffop(
+    acts: Tensor, sigma_scale: float = 0.15, sigma_floor: float = 1e-6
+) -> Tensor:
+    """Row-normalized soft Gaussian diffusion operator over samples (no hard kNN).
+
+    Differentiable B×B operator: ``K = exp(-D**2 / 2 sigma**2)`` with the diagonal
+    zeroed and rows normalized to sum to 1. ``sigma = sigma_scale * median(off-
+    diagonal pairwise distance)``, computed under no_grad so the bandwidth is a
+    fixed per-batch scale (gradient flows through the kernel values, not sigma).
+    A fixed kernel (not the adaptive per-point kth-NN bandwidth) is required —
+    adaptive bandwidth + row-norm collapses to a near-uniform operator. sigma_scale
+    ~0.15-0.2 is the calibrated peaked regime; sigma_floor guards tiny distances.
+    """
+    D = torch.cdist(acts, acts)                       # [B, B]
+    B = D.shape[0]
+    eye = torch.eye(B, dtype=torch.bool, device=D.device)
+    with torch.no_grad():
+        sigma = (sigma_scale * D[~eye].median()).clamp_min(sigma_floor)
+    K = torch.exp(-(D ** 2) / (2.0 * sigma ** 2))
+    K = K.masked_fill(eye, 0.0)
+    return K / K.sum(dim=1, keepdim=True).clamp_min(1e-12)
+
+
+def _diffop_mse_loss(
+    student_acts: Tensor,
+    teacher_acts: Tensor,
+    sigma_scale: float = 0.15,
+    sigma_floor: float = 1e-6,
+) -> Tensor:
+    """MSE between the soft diffusion operators of student vs teacher activations.
+
+    The minibatch operator-matching (M2) loss. The operator is B×B over samples,
+    so student/teacher feature dims may differ (no dim-matching / Procrustes). The
+    teacher operator is built under no_grad; the loss backprops to the student only.
+    """
+    p_student = _soft_diffop(student_acts, sigma_scale, sigma_floor)
+    with torch.no_grad():
+        p_teacher = _soft_diffop(teacher_acts, sigma_scale, sigma_floor)
+    return ((p_student - p_teacher) ** 2).mean()
+
+
 def _sanitize_buffer_name(layer_path: str) -> str:
     """Translate a dotted layer path to a valid Python identifier for register_buffer."""
     return "_target__" + (
