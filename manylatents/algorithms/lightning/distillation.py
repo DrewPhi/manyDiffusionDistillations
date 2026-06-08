@@ -196,6 +196,9 @@ class Distillation(LightningModule):
         alignment_batch_size: int = 16,
         init_seed: int = 42,
         lr_scheduler: Optional[Mapping[str, Any]] = None,
+        kl_weight: float = 0.0,
+        kl_temperature: float = 1.0,
+        teacher: Optional[nn.Module] = None,
     ) -> None:
         super().__init__()
 
@@ -227,6 +230,17 @@ class Distillation(LightningModule):
         self.alignment_weight = float(alignment_weight)
         self.alignment_batch_size = int(alignment_batch_size)
         self.init_seed = int(init_seed)
+
+        # Logit-KL control: resident teacher forwarded per minibatch in
+        # training_step. kl_weight=0 (default) is fully backward-compatible.
+        self.kl_weight = float(kl_weight)
+        self.kl_temperature = float(kl_temperature)
+        if self.kl_weight > 0 and teacher is None:
+            raise ValueError("kl_weight > 0 requires a resident teacher")
+        # Stash the teacher OUTSIDE nn.Module registration so its (large) params
+        # never enter the optimizer, state_dict, or checkpoints. The runner moves
+        # it to the student device and freezes it before construction.
+        object.__setattr__(self, "_resident_teacher", teacher)
 
         # Register snapshot tensors as buffers so .to(device) moves them and
         # Lightning saves them in checkpoints. Biased copy (.clone()) so
@@ -262,6 +276,7 @@ class Distillation(LightningModule):
         layer_pairs: List[Mapping[str, Any]],
         datamodule: Any,
         alignment_weight: float = 0.0,
+        teacher: Optional[nn.Module] = None,
     ) -> "Distillation":
         """Build a Distillation from a run-spec dict.
 
@@ -297,6 +312,8 @@ class Distillation(LightningModule):
                 "total_steps": total_steps,
             }
 
+        kl = training.get("kl_distillation") or {}
+
         return cls(
             datamodule=datamodule,
             student=student,
@@ -307,6 +324,9 @@ class Distillation(LightningModule):
             alignment_batch_size=int(repro["alignment"]["batch_size"]),
             init_seed=int(repro["seeds"]["global_seed"]),
             lr_scheduler=lr_scheduler,
+            kl_weight=float(kl.get("weight", 0.0)),
+            kl_temperature=float(kl.get("temperature", 1.0)),
+            teacher=teacher,
         )
 
     @property
@@ -351,6 +371,18 @@ class Distillation(LightningModule):
             total = task_loss + self.alignment_weight * align_loss
         else:
             total = task_loss
+
+        if self.kl_weight > 0:
+            with torch.no_grad():
+                t_out = self._resident_teacher(
+                    input_ids=batch["input_ids"],
+                    attention_mask=batch["attention_mask"],
+                )
+            kl_loss = _logit_kl_loss(
+                outputs.logits, t_out.logits, batch["attention_mask"], self.kl_temperature
+            )
+            self.log("train_kl_loss", kl_loss, prog_bar=False, on_step=True, on_epoch=False)
+            total = total + self.kl_weight * kl_loss
 
         self.log(
             "train_total_loss",
