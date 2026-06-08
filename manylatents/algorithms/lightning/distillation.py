@@ -22,6 +22,7 @@ from typing import Any, Dict, List, Mapping, Optional
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from lightning.pytorch import LightningModule
 from torch import Tensor
 
@@ -29,6 +30,37 @@ from manylatents.lightning.activation_snapshot import ActivationSnapshot
 from manylatents.lightning.hooks import ActivationExtractor, LayerSpec, resolve_layer
 
 __all__ = ["Distillation"]
+
+
+def _logit_kl_loss(
+    student_logits: Tensor,
+    teacher_logits: Tensor,
+    attention_mask: Tensor,
+    temperature: float = 1.0,
+) -> Tensor:
+    """Temperature-scaled KL(teacher || student) over non-pad positions.
+
+    The standard Hinton knowledge-distillation term: softmax both logit tensors
+    at ``temperature``, take per-position KL(teacher || student) over the vocab,
+    multiply by T**2 (so the gradient magnitude is temperature-invariant), and
+    average over positions where ``attention_mask`` is 1.
+
+    Args:
+        student_logits / teacher_logits: ``[B, T, V]`` (teacher detached upstream).
+        attention_mask: ``[B, T]``, 1 for real tokens, 0 for padding.
+        temperature: softmax temperature.
+
+    Returns:
+        Scalar (0-dim) tensor.
+    """
+    t = float(temperature)
+    log_p_student = F.log_softmax(student_logits / t, dim=-1)
+    p_teacher = F.softmax(teacher_logits / t, dim=-1)
+    log_p_teacher = F.log_softmax(teacher_logits / t, dim=-1)
+    kl = (p_teacher * (log_p_teacher - log_p_student)).sum(dim=-1)  # [B, T]
+    mask = attention_mask.to(kl.dtype)
+    denom = mask.sum().clamp_min(1.0)
+    return (kl * mask).sum() / denom * (t * t)
 
 
 def _sanitize_buffer_name(layer_path: str) -> str:
@@ -178,6 +210,63 @@ class Distillation(LightningModule):
                         f"layer_pairs student={pair['student']!r} does not "
                         f"resolve on the provided student module: {exc}"
                     ) from exc
+
+    @classmethod
+    def from_spec(
+        cls,
+        spec: Mapping[str, Any],
+        *,
+        student: nn.Module,
+        activation_snapshot: ActivationSnapshot,
+        layer_pairs: List[Mapping[str, Any]],
+        datamodule: Any,
+        alignment_weight: float = 0.0,
+    ) -> "Distillation":
+        """Build a Distillation from a run-spec dict.
+
+        Reads ``spec["reproducibility"]["{optimizer, alignment, seeds, training, lr_scheduler}"]``
+        and maps them onto ``__init__`` kwargs. ``total_steps`` for the LR
+        schedule is the sum of phase2+phase3 ``max_steps`` when
+        ``training.staged_training.enabled`` is True, otherwise
+        ``training.max_steps``.
+        """
+        repro = spec["reproducibility"]
+
+        opt = repro["optimizer"]
+        optimizer = {
+            "learning_rate": float(opt["learning_rate"]),
+            "weight_decay": float(opt["weight_decay"]),
+            "betas": tuple(opt["betas"]),
+            "eps": float(opt["eps"]),
+        }
+
+        training = repro["training"]
+        staged = training.get("staged_training") or {}
+        if bool(staged.get("enabled", False)):
+            total_steps = int(staged["phase2"]["max_steps"]) + int(
+                staged["phase3"]["max_steps"]
+            )
+        else:
+            total_steps = int(training["max_steps"])
+
+        lr_scheduler: Optional[Dict[str, Any]] = None
+        if "lr_scheduler" in repro:
+            lr_scheduler = {
+                "warmup_steps": int(repro["lr_scheduler"]["warmup_steps"]),
+                "total_steps": total_steps,
+            }
+
+        return cls(
+            datamodule=datamodule,
+            student=student,
+            activation_snapshot=activation_snapshot,
+            layer_pairs=list(layer_pairs),
+            optimizer=optimizer,
+            alignment_weight=float(alignment_weight),
+            alignment_batch_size=int(repro["alignment"]["batch_size"]),
+            init_seed=int(repro["seeds"]["global_seed"]),
+            lr_scheduler=lr_scheduler,
+        )
 
     @property
     def snapshot(self) -> ActivationSnapshot:
