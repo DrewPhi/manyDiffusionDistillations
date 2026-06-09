@@ -104,6 +104,18 @@ def _diffop_mse_loss(
     return ((p_student - p_teacher) ** 2).mean()
 
 
+def _masked_mean_pool(hidden: Tensor, attention_mask: Tensor) -> Tensor:
+    """Mean-pool a [B, T, D] hidden state over non-pad tokens -> [B, D].
+
+    The minibatch operator (M2) is built over the B pooled per-sample vectors,
+    matching the mean reduction used to build the offline ActivationSnapshot.
+    """
+    mask = attention_mask.unsqueeze(-1).to(hidden.dtype)        # [B, T, 1]
+    summed = (hidden * mask).sum(dim=1)                          # [B, D]
+    counts = mask.sum(dim=1).clamp_min(1.0)                      # [B, 1]
+    return summed / counts
+
+
 def _sanitize_buffer_name(layer_path: str) -> str:
     """Translate a dotted layer path to a valid Python identifier for register_buffer."""
     return "_target__" + (
@@ -198,6 +210,10 @@ class Distillation(LightningModule):
         lr_scheduler: Optional[Mapping[str, Any]] = None,
         kl_weight: float = 0.0,
         kl_temperature: float = 1.0,
+        geom_weight: float = 0.0,
+        geom_sigma_scale: float = 0.15,
+        geom_student_layer: int = -2,
+        geom_teacher_layer: int = -2,
         teacher: Optional[nn.Module] = None,
     ) -> None:
         super().__init__()
@@ -235,8 +251,17 @@ class Distillation(LightningModule):
         # training_step. kl_weight=0 (default) is fully backward-compatible.
         self.kl_weight = float(kl_weight)
         self.kl_temperature = float(kl_temperature)
-        if self.kl_weight > 0 and teacher is None:
-            raise ValueError("kl_weight > 0 requires a resident teacher")
+        # Minibatch diffop-MSE (M2): pool a hidden layer per sample and match the
+        # B×B soft diffusion operator of student vs resident teacher on the live
+        # batch. geom_weight=0 (default) is fully backward-compatible.
+        self.geom_weight = float(geom_weight)
+        self.geom_sigma_scale = float(geom_sigma_scale)
+        self.geom_student_layer = int(geom_student_layer)
+        self.geom_teacher_layer = int(geom_teacher_layer)
+        if (self.kl_weight > 0 or self.geom_weight > 0) and teacher is None:
+            raise ValueError(
+                "kl_weight > 0 or geom_weight > 0 requires a resident teacher"
+            )
         # Stash the teacher OUTSIDE nn.Module registration so its (large) params
         # never enter the optimizer, state_dict, or checkpoints. The runner moves
         # it to the student device and freezes it before construction.
@@ -313,6 +338,7 @@ class Distillation(LightningModule):
             }
 
         kl = training.get("kl_distillation") or {}
+        geom = training.get("geom_distillation") or {}
 
         return cls(
             datamodule=datamodule,
@@ -326,6 +352,10 @@ class Distillation(LightningModule):
             lr_scheduler=lr_scheduler,
             kl_weight=float(kl.get("weight", 0.0)),
             kl_temperature=float(kl.get("temperature", 1.0)),
+            geom_weight=float(geom.get("weight", 0.0)),
+            geom_sigma_scale=float(geom.get("sigma_scale", 0.15)),
+            geom_student_layer=int(geom.get("student_layer", -2)),
+            geom_teacher_layer=int(geom.get("teacher_layer", -2)),
             teacher=teacher,
         )
 
@@ -355,7 +385,10 @@ class Distillation(LightningModule):
         return self.student(**inputs)
 
     def training_step(self, batch: Mapping[str, Tensor], batch_idx: int) -> Tensor:
-        outputs = self(**batch)
+        if self.geom_weight > 0:
+            outputs = self(**batch, output_hidden_states=True)
+        else:
+            outputs = self(**batch)
         task_loss: Tensor = outputs.loss if hasattr(outputs, "loss") else outputs["loss"]
         self.log("train_task_loss", task_loss, prog_bar=False, on_step=True, on_epoch=False)
 
@@ -383,6 +416,23 @@ class Distillation(LightningModule):
             )
             self.log("train_kl_loss", kl_loss, prog_bar=False, on_step=True, on_epoch=False)
             total = total + self.kl_weight * kl_loss
+
+        if self.geom_weight > 0:
+            with torch.no_grad():
+                t_out = self._resident_teacher(
+                    input_ids=batch["input_ids"],
+                    attention_mask=batch["attention_mask"],
+                    output_hidden_states=True,
+                )
+            s_pool = _masked_mean_pool(
+                outputs.hidden_states[self.geom_student_layer], batch["attention_mask"]
+            )
+            t_pool = _masked_mean_pool(
+                t_out.hidden_states[self.geom_teacher_layer], batch["attention_mask"]
+            )
+            geom_loss = _diffop_mse_loss(s_pool, t_pool, self.geom_sigma_scale)
+            self.log("train_geom_loss", geom_loss, prog_bar=False, on_step=True, on_epoch=False)
+            total = total + self.geom_weight * geom_loss
 
         self.log(
             "train_total_loss",
