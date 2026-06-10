@@ -54,6 +54,15 @@ def _logit_kl_loss(
         Scalar (0-dim) tensor.
     """
     t = float(temperature)
+    # A from-scratch student may pad its vocab to a different multiple of 128 than
+    # the teacher (e.g. pythia 410m=50432 vs 6.9b=50304); the surplus rows are
+    # unused padding token ids the tokenizer never emits. Align on the common min
+    # vocab so the KL is taken over the shared (real-token) output space.
+    v = min(student_logits.size(-1), teacher_logits.size(-1))
+    if student_logits.size(-1) != v:
+        student_logits = student_logits[..., :v]
+    if teacher_logits.size(-1) != v:
+        teacher_logits = teacher_logits[..., :v]
     log_p_student = F.log_softmax(student_logits / t, dim=-1)
     p_teacher = F.softmax(teacher_logits / t, dim=-1)
     log_p_teacher = F.log_softmax(teacher_logits / t, dim=-1)

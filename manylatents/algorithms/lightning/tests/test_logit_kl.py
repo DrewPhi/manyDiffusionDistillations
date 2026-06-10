@@ -63,3 +63,25 @@ def test_scalar_shape_from_BTV():
     loss = _logit_kl_loss(torch.randn(3, 4, 9), torch.randn(3, 4, 9),
                           torch.ones(3, 4), temperature=1.5)
     assert loss.ndim == 0 and torch.isfinite(loss)
+
+
+def test_mismatched_vocab_aligns_on_common():
+    # From-scratch student pads its vocab to a different multiple of 128 than the
+    # teacher (pythia 410m=50432 vs 6.9b=50304); the extra rows are unused padding
+    # token ids. The loss must align on the common min vocab, not raise.
+    student = torch.randn(2, 3, 50432)
+    teacher = torch.randn(2, 3, 50304)
+    mask = torch.ones(2, 3)
+    loss = _logit_kl_loss(student, teacher, mask, temperature=2.0)
+    assert loss.ndim == 0 and torch.isfinite(loss)
+
+
+def test_mismatched_vocab_matches_truncated():
+    # aligning on the common vocab == truncating the larger tensor up front
+    torch.manual_seed(0)
+    student = torch.randn(2, 3, 70)
+    teacher = torch.randn(2, 3, 64)
+    mask = torch.ones(2, 3)
+    got = _logit_kl_loss(student, teacher, mask, temperature=1.0)
+    ref = _logit_kl_loss(student[..., :64], teacher, mask, temperature=1.0)
+    assert abs(float(got) - float(ref)) < 1e-6
