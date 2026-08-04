@@ -42,3 +42,15 @@ def test_format_interval_variants():
     assert format_interval(Interval(0.96, 0.94, 0.98, 3)) == "0.96 [0.94, 0.98]"
     assert format_interval(Interval(0.5, 0.5, 0.5, 1)) == "0.50 (n=1)"
     assert "e-07" in format_interval(Interval(4e-7, 3e-7, 5e-7, 3)).replace("E", "e")
+
+
+def test_empty_input_bootstrap_and_mean_se():
+    iv = bootstrap_ci([])
+    assert iv.n == 0 and math.isnan(iv.mean) and math.isnan(iv.lo) and math.isnan(iv.hi)
+    m, se = mean_se([])
+    assert math.isnan(m) and math.isnan(se)
+
+
+def test_format_interval_zero_n_is_honest():
+    s = format_interval(Interval(float("nan"), float("nan"), float("nan"), 0))
+    assert "(n=0)" in s and "(n=1)" not in s

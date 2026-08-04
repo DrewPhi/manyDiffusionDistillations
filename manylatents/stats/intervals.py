@@ -62,7 +62,7 @@ def paired_bootstrap_diff(a: Sequence[float], b: Sequence[float],
 def format_interval(iv: Interval, sci_below: float = 1e-3) -> str:
     if iv.n <= 1:
         m = f"{iv.mean:.1e}" if abs(iv.mean) < sci_below else f"{iv.mean:.2f}"
-        return f"{m} (n=1)"
+        return f"{m} (n={iv.n})"
     if abs(iv.mean) < sci_below:
         return f"{iv.mean:.1e} [{iv.lo:.1e}, {iv.hi:.1e}]"
     return f"{iv.mean:.2f} [{iv.lo:.2f}, {iv.hi:.2f}]"
