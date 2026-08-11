@@ -71,8 +71,15 @@ from manylatents.metrics.diffop_alignment import (
     principal_angle_cosines,
     diffop_frobenius_distance,
     diffop_subspace_alignment,
+    symmetrize_operator,
 )
-from manylatents.metrics.platonic_convergence import PlatonicConvergence, alignment_matrix, MEASURES
+from manylatents.metrics.platonic_convergence import (
+    PlatonicConvergence,
+    alignment_matrix,
+    alignment_matrix_from_operators,
+    MEASURES,
+    OPERATOR_MEASURES,
+)
 
 # Spectral metrics
 from manylatents.metrics.spectral_gap_ratio import SpectralGapRatio
@@ -158,7 +165,10 @@ __all__ = [
     "diffop_subspace_alignment",
     "PlatonicConvergence",
     "alignment_matrix",
+    "alignment_matrix_from_operators",
+    "symmetrize_operator",
     "MEASURES",
+    "OPERATOR_MEASURES",
     # Spectral metrics
     "SpectralGapRatio",
     "SpectralDecayRate",

@@ -13,11 +13,16 @@ from manylatents.metrics.diffop_alignment import (
     build_operator,
     diffop_frobenius_distance,
     diffop_subspace_alignment,
+    symmetrize_operator,
 )
 from manylatents.metrics.mutual_knn import mutual_knn_pairwise
 from manylatents.metrics.registry import register_metric
 
 MEASURES: Tuple[str, ...] = ("mutual_knn", "diffop_frobenius", "diffop_angles")
+
+#: Measures computable from a diffusion operator alone. "mutual_knn" is absent
+#: because it needs the point cloud, which an operator does not carry.
+OPERATOR_MEASURES: Tuple[str, ...] = ("diffop_frobenius", "diffop_angles")
 
 # Value on the diagonal (a model compared with itself) per measure.
 _SELF_VALUE = {"mutual_knn": 1.0, "diffop_frobenius": 0.0, "diffop_angles": 1.0}
@@ -68,6 +73,86 @@ def alignment_matrix(
             if measure == "mutual_knn":
                 val = float(mutual_knn_pairwise(model_acts[names[i]], model_acts[names[j]], k=k).mean())
             elif measure == "diffop_frobenius":
+                val = diffop_frobenius_distance(ops[names[i]], ops[names[j]])
+            else:
+                val = diffop_subspace_alignment(
+                    ops[names[i]], ops[names[j]], n_components=n_components
+                )
+            mat[i, j] = val
+            mat[j, i] = val
+    return names, mat
+
+
+def prepare_operator_zoo(model_ops: Dict[str, np.ndarray]) -> Tuple[List[str], Dict[str, np.ndarray]]:
+    """Validate and symmetrize a name -> (N, N) operator mapping.
+
+    Shared by ``alignment_matrix_from_operators`` and the operator-input null so
+    both see byte-identical inputs.
+
+    Raises:
+        ValueError: Fewer than 2 models, a non-square operator, or operators
+            built over different numbers of probe items (which would mean the
+            rows are not the same probe, so no comparison is meaningful).
+    """
+    names = list(model_ops.keys())
+    if len(names) < 2:
+        raise ValueError("Need at least 2 models for convergence measurement")
+
+    ops = {name: symmetrize_operator(model_ops[name]) for name in names}
+    n_samples = ops[names[0]].shape[0]
+    for name in names:
+        if ops[name].shape[0] != n_samples:
+            raise ValueError(
+                f"Operator shape mismatch: {name} is {ops[name].shape}, "
+                f"expected ({n_samples}, {n_samples})"
+            )
+    return names, ops
+
+
+def alignment_matrix_from_operators(
+    model_ops: Dict[str, np.ndarray],
+    measure: str = "diffop_frobenius",
+    n_components: int = 10,
+) -> Tuple[List[str], np.ndarray]:
+    """``alignment_matrix`` for zoos whose diffusion operators are already built.
+
+    Same measures, same diagonal convention, same pairwise functions as the
+    activation path — it only skips ``build_operator``. That makes it usable on
+    operators cached to disk, where the activations are long gone.
+
+    Operators are symmetrized on entry (see ``symmetrize_operator``); for an
+    operator that ``build_operator`` produced this is exactly a no-op, so this
+    function reproduces ``alignment_matrix`` bit for bit.
+
+    Args:
+        model_ops: Model name -> (N, N) diffusion operator. Row i must be the
+            same probe item in every model.
+        measure: One of OPERATOR_MEASURES.
+        n_components: Eigen-subspace size for "diffop_angles".
+
+    Returns:
+        (model_names, matrix) with matrix symmetric of shape (M, M).
+
+    Raises:
+        ValueError: If ``measure`` is "mutual_knn" (needs raw activations) or
+            otherwise unknown.
+    """
+    if measure == "mutual_knn":
+        raise ValueError(
+            "measure='mutual_knn' needs raw activations: it counts shared "
+            "neighbours in the point cloud, which a diffusion operator does not "
+            f"carry. From cached operators use one of {OPERATOR_MEASURES}."
+        )
+    if measure not in OPERATOR_MEASURES:
+        raise ValueError(f"Unknown measure: {measure}. Expected one of {OPERATOR_MEASURES}")
+
+    names, ops = prepare_operator_zoo(model_ops)
+
+    m = len(names)
+    mat = np.full((m, m), _SELF_VALUE[measure], dtype=float)
+    for i in range(m):
+        for j in range(i + 1, m):
+            if measure == "diffop_frobenius":
                 val = diffop_frobenius_distance(ops[names[i]], ops[names[j]])
             else:
                 val = diffop_subspace_alignment(

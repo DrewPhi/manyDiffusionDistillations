@@ -11,9 +11,15 @@ These two nulls answer that.
 - ``zoo_permutation_null`` does the same for a whole model zoo, and returns the
   null of the *aggregate* statistic (mean of the strict upper triangle) so that
   a multi-model score is compared against a multi-model null.
+- ``zoo_permutation_null_from_operators`` is the same null for a zoo whose
+  diffusion operators are already built (e.g. cached to disk). Exact, not
+  approximate — see below.
 - ``split_half_spectral_null`` compares two disjoint halves of ONE model. Every
   bit of the resulting distance is finite-sample noise, so it is the CLT floor
-  a spectral convergence claim must clear.
+  a spectral convergence claim must clear. It has no cached-operator form: a
+  principal submatrix is not the operator you would build on that subset, since
+  the adaptive bandwidth and the degree normalisation both range over all
+  points. That control needs raw activations.
 
 Permutation equivariance
 ------------------------
@@ -118,13 +124,66 @@ class _PermutationCache:
                 )
                 self.knn_idx[name] = np.asarray(idx)
         else:
-            for name in self.names:
-                op = build_operator(acts[name], knn=knn)
-                self.ops[name] = op
-                if measure == "diffop_frobenius":
-                    self.fro[name] = float(np.linalg.norm(op, "fro"))
-                else:
-                    self.eigvecs[name] = top_eigvecs(op, n_components)
+            self._absorb_operators({name: build_operator(acts[name], knn=knn)
+                                    for name in self.names})
+
+    # -- construction from already-built operators ----------------------------
+
+    @classmethod
+    def from_operators(
+        cls,
+        model_ops: Dict[str, np.ndarray],
+        measure: str,
+        n_components: int = 10,
+    ) -> "_PermutationCache":
+        """Cache built from operators instead of activations.
+
+        Exact, not approximate: the permuted operator is ``op[np.ix_(perm, perm)]``
+        and the permuted eigenvectors are ``eigvecs[perm]``, both of which need
+        only the operator. Nothing downstream of construction differs from the
+        activation path, so the two produce identical null draws.
+
+        Raises:
+            ValueError: If ``measure`` needs raw activations ("mutual_knn").
+        """
+        from manylatents.metrics.platonic_convergence import (
+            OPERATOR_MEASURES,
+            prepare_operator_zoo,
+        )
+
+        if measure == "mutual_knn":
+            raise ValueError(
+                "measure='mutual_knn' needs raw activations: its per-permutation "
+                "statistic relabels kNN neighbour lists, which a diffusion "
+                f"operator does not carry. Use one of {OPERATOR_MEASURES}."
+            )
+        if measure not in OPERATOR_MEASURES:
+            raise ValueError(f"Unknown measure: {measure}. Expected one of {OPERATOR_MEASURES}")
+
+        names, ops = prepare_operator_zoo(model_ops)
+
+        self = cls.__new__(cls)
+        self.measure = measure
+        self.k = 0
+        self.n_components = n_components
+        self.names = names
+        self.n_samples = ops[names[0]].shape[0]
+        self.knn_idx = {}
+        self.ops = {}
+        self.fro = {}
+        self.eigvecs = {}
+        self._absorb_operators(ops)
+        return self
+
+    def _absorb_operators(self, ops: Dict[str, np.ndarray]) -> None:
+        """Store the per-model quantity the measure's ``view`` will permute."""
+        for name in self.names:
+            op = ops[name]
+            self.ops[name] = op
+            if self.measure == "diffop_frobenius":
+                self.fro[name] = float(np.linalg.norm(op, "fro"))
+            else:
+                self.eigvecs[name] = top_eigvecs(op, self.n_components)
 
     # -- per-permutation views ------------------------------------------------
 
@@ -260,10 +319,66 @@ def zoo_permutation_null(
             k=k, n_components=n_components, knn=knn,
         )
 
-    rng = np.random.default_rng(seed)
     cache = _PermutationCache(
         model_acts, measure=measure, k=k, n_components=n_components, knn=knn
     )
+    return _zoo_null_from_cache(cache, n_perm=n_perm, seed=seed)
+
+
+def zoo_permutation_null_from_operators(
+    model_ops: Dict[str, np.ndarray],
+    measure: str = "diffop_frobenius",
+    n_perm: int = 200,
+    seed: int = 0,
+    n_components: int = 10,
+) -> np.ndarray:
+    """``zoo_permutation_null`` for zoos whose operators are already built.
+
+    Exact on cached operators, not an approximation. Row-permuting activations
+    produces exactly ``Pi op Pi.T`` (see the module docstring), so every
+    quantity the fast path permutes — the operator itself, its top eigenvectors,
+    its Frobenius norm — is recoverable from the operator alone. Given the same
+    seed this returns draw-for-draw the same array as ``zoo_permutation_null``
+    on the activations those operators were built from.
+
+    Operators are symmetrized on entry, since operators cached to disk are
+    commonly row-stochastic rather than symmetric.
+
+    Args:
+        model_ops: Model name -> (N, N) diffusion operator, index-aligned. >= 2.
+        measure: "diffop_frobenius" or "diffop_angles". "mutual_knn" raises —
+            it needs the point cloud.
+        n_perm: Number of permutations.
+        seed: RNG seed; the null is fully determined by it.
+        n_components: Eigen-subspace size for "diffop_angles".
+
+    Returns:
+        (n_perm,) array of mean-of-upper-triangle statistics.
+
+    Note:
+        There is no cached-operator counterpart to ``split_half_spectral_null``.
+        A principal submatrix of an operator is NOT the operator you would build
+        on that subset of points: the adaptive bandwidth comes from the k-th
+        neighbour among ALL points and the degree normalisation is over all rows.
+        That CLT floor needs raw activations.
+    """
+    cache = _PermutationCache.from_operators(
+        model_ops, measure=measure, n_components=n_components
+    )
+    return _zoo_null_from_cache(cache, n_perm=n_perm, seed=seed)
+
+
+def _zoo_null_from_cache(
+    cache: _PermutationCache, n_perm: int, seed: int
+) -> np.ndarray:
+    """Draw the aggregate zoo null from a prepared permutation cache.
+
+    Shared by the activation-input and operator-input entry points so the two
+    cannot drift — including the RNG consumption order, which is what makes
+    them comparable draw for draw.
+    """
+    rng = np.random.default_rng(seed)
+    names = cache.names
     m = len(names)
 
     out = np.empty(n_perm, dtype=float)

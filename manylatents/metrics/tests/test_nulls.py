@@ -198,3 +198,85 @@ def test_zoo_null_rejects_single_model():
     rng = np.random.default_rng(15)
     with pytest.raises(ValueError, match="at least 2 models"):
         zoo_permutation_null({"a": rng.normal(size=(20, 3))}, measure="mutual_knn", n_perm=2)
+
+
+# ---------------------------------------------------------------------------
+# Operator-input zoo null
+#
+# Row-permuting activations yields exactly Pi op Pi.T, so on cached operators
+# this null is exact — not an approximation of the activation-based null.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("measure", ["diffop_frobenius", "diffop_angles"])
+def test_operator_zoo_null_equals_activation_zoo_null(measure):
+    """Load-bearing: identical null draws, not merely a similar distribution."""
+    from manylatents.metrics.diffop_alignment import build_operator
+    from manylatents.metrics.nulls import (
+        zoo_permutation_null,
+        zoo_permutation_null_from_operators,
+    )
+
+    rng = np.random.default_rng(20)
+    base = rng.normal(size=(50, 5)).astype(np.float32)
+    zoo = {
+        "a": base,
+        "b": rng.normal(size=(50, 5)).astype(np.float32),
+        "c": (base + 0.05 * rng.normal(size=(50, 5))).astype(np.float32),
+    }
+    ops = {name: build_operator(acts, knn=6) for name, acts in zoo.items()}
+
+    from_acts = zoo_permutation_null(zoo, measure=measure, n_perm=25, seed=3,
+                                     n_components=4, knn=6)
+    from_ops = zoo_permutation_null_from_operators(ops, measure=measure, n_perm=25,
+                                                   seed=3, n_components=4)
+    np.testing.assert_allclose(from_ops, from_acts, rtol=0, atol=0)
+
+
+def test_operator_zoo_null_rejects_mutual_knn_and_single_model():
+    from manylatents.metrics.diffop_alignment import build_operator
+    from manylatents.metrics.nulls import zoo_permutation_null_from_operators
+
+    rng = np.random.default_rng(21)
+    ops = {
+        "a": build_operator(rng.normal(size=(30, 3)).astype(np.float32), knn=5),
+        "b": build_operator(rng.normal(size=(30, 3)).astype(np.float32), knn=5),
+    }
+    with pytest.raises(ValueError, match="mutual_knn"):
+        zoo_permutation_null_from_operators(ops, measure="mutual_knn", n_perm=2)
+    with pytest.raises(ValueError, match="at least 2 models"):
+        zoo_permutation_null_from_operators({"a": ops["a"]}, measure="diffop_angles",
+                                            n_perm=2)
+
+
+def test_operator_zoo_null_is_deterministic_and_correctly_shaped():
+    from manylatents.metrics.diffop_alignment import build_operator
+    from manylatents.metrics.nulls import zoo_permutation_null_from_operators
+
+    rng = np.random.default_rng(22)
+    ops = {
+        name: build_operator(rng.normal(size=(40, 4)).astype(np.float32), knn=6)
+        for name in ("a", "b", "c")
+    }
+    kw = dict(measure="diffop_angles", n_perm=12, seed=9, n_components=3)
+    first = zoo_permutation_null_from_operators(ops, **kw)
+    assert first.shape == (12,)
+    np.testing.assert_allclose(first, zoo_permutation_null_from_operators(ops, **kw))
+
+
+def test_observed_beats_operator_null_when_correspondence_is_real():
+    """Sanity: near-identical operators clear their own permutation null."""
+    from manylatents.metrics.diffop_alignment import build_operator
+    from manylatents.metrics.nulls import zoo_permutation_null_from_operators
+    from manylatents.metrics.platonic_convergence import alignment_matrix_from_operators
+
+    rng = np.random.default_rng(23)
+    base = rng.normal(size=(60, 5)).astype(np.float32)
+    ops = {
+        "a": build_operator(base, knn=8),
+        "b": build_operator(base + 0.02 * rng.normal(size=(60, 5)).astype(np.float32), knn=8),
+    }
+    names, mat = alignment_matrix_from_operators(ops, measure="diffop_angles", n_components=4)
+    observed = float(mat[np.triu_indices(len(names), k=1)].mean())
+    null = zoo_permutation_null_from_operators(ops, measure="diffop_angles", n_perm=99,
+                                               seed=0, n_components=4)
+    assert empirical_p(observed, null, higher_is_better=True) < 0.05

@@ -37,6 +37,21 @@ def build_operator(acts: np.ndarray, knn: int = 35, alpha: float = 1.0) -> np.nd
     return 0.5 * (op + op.T)
 
 
+def symmetrize_operator(op: np.ndarray) -> np.ndarray:
+    """Return ``(op + op.T) / 2`` after checking that ``op`` is square.
+
+    The diffop measures assume a symmetric operator so that ``np.linalg.eigh``
+    is valid. ``build_operator`` already returns one, and symmetrizing it again
+    is exactly a no-op. Operators loaded from disk often are NOT symmetric: the
+    default diffusion operator is row-stochastic, and ``eigh`` would silently
+    read a single triangle of it. Route those through here.
+    """
+    arr = np.asarray(op, dtype=float)
+    if arr.ndim != 2 or arr.shape[0] != arr.shape[1]:
+        raise ValueError(f"Operator must be a square 2-D matrix, got shape {arr.shape}")
+    return 0.5 * (arr + arr.T)
+
+
 def top_eigvecs(op: np.ndarray, n_components: int) -> np.ndarray:
     """Eigenvectors of the ``n_components`` largest-magnitude eigenvalues."""
     sym = 0.5 * (op + op.T)

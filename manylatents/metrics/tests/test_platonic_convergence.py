@@ -100,3 +100,100 @@ def test_all_measures_accept_singleton_middle_axis(measure):
     names_2d, mat_2d = alignment_matrix(zoo2d, **kw)
     assert names_3d == names_2d
     np.testing.assert_allclose(mat_3d, mat_2d, atol=1e-12)
+
+
+# ---------------------------------------------------------------------------
+# Operator-input adapter
+#
+# The 12-model zoo's diffusion operators are already on disk, so the metric has
+# to be reachable without the activations that produced them. These tests pin
+# that path to the activation path it replaces.
+# ---------------------------------------------------------------------------
+
+DIFFOP_MEASURES = ("diffop_frobenius", "diffop_angles")
+
+
+@pytest.mark.parametrize("measure", DIFFOP_MEASURES)
+def test_operator_path_equals_activation_path(measure):
+    """Load-bearing: the adapter must reproduce ``alignment_matrix`` exactly.
+
+    Build operators from activations with the same ``build_operator`` the
+    activation path uses, then feed them to the adapter. Any disagreement means
+    the cached-operator numbers are not the numbers the tested stack computes.
+    """
+    from manylatents.metrics.diffop_alignment import build_operator
+    from manylatents.metrics.platonic_convergence import alignment_matrix_from_operators
+
+    zoo = _zoo(seed=3)
+    ops = {name: build_operator(acts, knn=5) for name, acts in zoo.items()}
+
+    names_act, mat_act = alignment_matrix(zoo, measure=measure, n_components=3, knn=5)
+    names_op, mat_op = alignment_matrix_from_operators(ops, measure=measure, n_components=3)
+
+    assert names_op == names_act
+    np.testing.assert_allclose(mat_op, mat_act, rtol=0, atol=0)
+
+
+def test_operator_path_rejects_mutual_knn():
+    """mutual_knn needs the point cloud; an operator cannot supply it."""
+    from manylatents.metrics.diffop_alignment import build_operator
+    from manylatents.metrics.platonic_convergence import alignment_matrix_from_operators
+
+    ops = {name: build_operator(acts, knn=5) for name, acts in _zoo(seed=4).items()}
+    with pytest.raises(ValueError, match="mutual_knn"):
+        alignment_matrix_from_operators(ops, measure="mutual_knn")
+
+
+def test_operator_path_diagonal_and_score_conventions():
+    """Same diagonal convention and same strict-upper-triangle score."""
+    from manylatents.metrics.diffop_alignment import build_operator
+    from manylatents.metrics.platonic_convergence import alignment_matrix_from_operators
+
+    ops = {name: build_operator(acts, knn=5) for name, acts in _zoo(seed=5).items()}
+
+    _, mat_fro = alignment_matrix_from_operators(ops, measure="diffop_frobenius")
+    np.testing.assert_allclose(np.diag(mat_fro), 0.0, atol=1e-12)
+    np.testing.assert_allclose(mat_fro, mat_fro.T, atol=1e-12)
+
+    _, mat_ang = alignment_matrix_from_operators(ops, measure="diffop_angles", n_components=3)
+    np.testing.assert_allclose(np.diag(mat_ang), 1.0, atol=1e-12)
+
+
+def test_operator_path_symmetrizes_row_stochastic_input():
+    """Cached operators on disk are row-stochastic, not symmetric.
+
+    ``np.linalg.eigh`` would silently read only one triangle of them, so the
+    adapter symmetrizes; feeding it ``op`` must equal feeding it ``(op+op.T)/2``.
+    """
+    from manylatents.metrics.diffop_alignment import symmetrize_operator
+    from manylatents.metrics.platonic_convergence import alignment_matrix_from_operators
+
+    rng = np.random.default_rng(6)
+    raw = {}
+    for name in ("a", "b", "c"):
+        w = rng.random((20, 20)) + 1e-3
+        raw[name] = w / w.sum(axis=1, keepdims=True)   # row-stochastic, asymmetric
+    assert not np.allclose(raw["a"], raw["a"].T)
+
+    pre = {name: symmetrize_operator(op) for name, op in raw.items()}
+    for measure in DIFFOP_MEASURES:
+        _, mat_raw = alignment_matrix_from_operators(raw, measure=measure, n_components=3)
+        _, mat_pre = alignment_matrix_from_operators(pre, measure=measure, n_components=3)
+        np.testing.assert_allclose(mat_raw, mat_pre, rtol=0, atol=0)
+
+
+def test_operator_path_rejects_shape_mismatch_and_single_model():
+    from manylatents.metrics.platonic_convergence import alignment_matrix_from_operators
+
+    rng = np.random.default_rng(7)
+    ok = np.eye(8) + 0.01 * rng.normal(size=(8, 8))
+    with pytest.raises(ValueError, match="at least 2 models"):
+        alignment_matrix_from_operators({"a": ok}, measure="diffop_angles")
+    with pytest.raises(ValueError, match="[Ss]hape mismatch"):
+        alignment_matrix_from_operators(
+            {"a": ok, "b": np.eye(9)}, measure="diffop_angles"
+        )
+    with pytest.raises(ValueError, match="square"):
+        alignment_matrix_from_operators(
+            {"a": np.eye(8)[:, :7], "b": np.eye(8)[:, :7]}, measure="diffop_angles"
+        )
