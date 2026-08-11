@@ -105,3 +105,14 @@ def test_unknown_measure_raises():
             "m2": rng.normal(size=(10, 2)).astype(np.float32)}
     with pytest.raises(ValueError, match="Unknown measure"):
         DiffopAlignment(embeddings=acts, measure="nope", knn=3)
+
+
+def test_build_operator_accepts_singleton_middle_axis():
+    """(N, 1, D) activations must squeeze, matching mutual_knn's convention."""
+    from manylatents.metrics.diffop_alignment import build_operator
+
+    rng = np.random.default_rng(31)
+    acts = rng.normal(size=(20, 4)).astype(np.float32)
+    np.testing.assert_allclose(
+        build_operator(acts[:, None, :], knn=5), build_operator(acts, knn=5), atol=1e-12
+    )

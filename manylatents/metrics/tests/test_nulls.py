@@ -96,3 +96,105 @@ def test_split_half_rejects_bandwidth_wider_than_half():
     acts = rng.normal(size=(20, 3)).astype(np.float32)
     with pytest.raises(ValueError, match="must be < half"):
         split_half_spectral_null(acts, n_splits=2, n_components=2, knn=10, seed=0)
+
+
+# ---------------------------------------------------------------------------
+# Permutation-equivariant fast path (must equal the naive rebuild exactly)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("measure", ["mutual_knn", "diffop_frobenius", "diffop_angles"])
+def test_fast_null_matches_naive_path(measure):
+    """The optimization is correctness-critical: caching operators and
+    eigenvectors across permutations must reproduce the full-rebuild path."""
+    from manylatents.metrics.nulls import _naive_permutation_null
+
+    rng = np.random.default_rng(11)
+    a = rng.normal(size=(50, 5)).astype(np.float32)
+    b = rng.normal(size=(50, 5)).astype(np.float32)
+    kw = dict(measure=measure, n_perm=12, seed=3, k=5, n_components=4, knn=8)
+    fast = permutation_null(a, b, **kw)
+    naive = _naive_permutation_null(a, b, **kw)
+    np.testing.assert_allclose(fast, naive, rtol=1e-9, atol=1e-9)
+
+
+@pytest.mark.parametrize("measure", ["mutual_knn", "diffop_frobenius", "diffop_angles"])
+def test_fast_zoo_null_matches_naive_path(measure):
+    from manylatents.metrics.nulls import _naive_zoo_permutation_null, zoo_permutation_null
+
+    rng = np.random.default_rng(12)
+    zoo = {
+        "a": rng.normal(size=(50, 5)).astype(np.float32),
+        "b": rng.normal(size=(50, 5)).astype(np.float32),
+        "c": rng.normal(size=(50, 5)).astype(np.float32),
+    }
+    kw = dict(measure=measure, n_perm=10, seed=5, k=5, n_components=4, knn=8)
+    fast = zoo_permutation_null(zoo, **kw)
+    naive = _naive_zoo_permutation_null(zoo, **kw)
+    np.testing.assert_allclose(fast, naive, rtol=1e-9, atol=1e-9)
+
+
+def test_zoo_null_reduces_to_pairwise_for_two_models():
+    """With M=2 the upper triangle is one cell, so the aggregate null is the
+    pairwise null — same RNG stream, same numbers."""
+    from manylatents.metrics.nulls import zoo_permutation_null
+
+    rng = np.random.default_rng(13)
+    a = rng.normal(size=(40, 4)).astype(np.float32)
+    b = rng.normal(size=(40, 4)).astype(np.float32)
+    kw = dict(measure="mutual_knn", n_perm=15, seed=2, k=5)
+    np.testing.assert_allclose(
+        zoo_permutation_null({"a": a, "b": b}, **kw), permutation_null(a, b, **kw)
+    )
+
+
+def test_zoo_null_is_on_the_same_footing_as_the_zoo_score():
+    """The bug this replaces: a 3-model mean-of-upper-triangle score was compared
+    against a null built from a single pair, which is not a test of that score.
+
+    A one-pair null is the wrong reference on two counts: it is centred on that
+    one pair's geometry, and it has the spread of a single pair rather than of a
+    mean over M(M-1)/2 of them.
+    """
+    from manylatents.metrics.nulls import zoo_permutation_null
+
+    rng = np.random.default_rng(20)
+    centres = rng.normal(size=(4, 5)) * 6.0
+    zoo = {
+        "a": rng.normal(size=(60, 5)).astype(np.float32),
+        "b": rng.normal(size=(60, 5)).astype(np.float32),
+        # Clustered, so its permutation null sits at a different level than a-b's.
+        "c": (centres[rng.integers(0, 4, 60)] + 0.3 * rng.normal(size=(60, 5))).astype(np.float32),
+    }
+    kw = dict(measure="diffop_angles", n_components=4, knn=8)
+    names = list(zoo)
+
+    zoo_null = zoo_permutation_null(zoo, n_perm=60, seed=0, **kw)
+    pair_nulls = {
+        (names[i], names[j]): permutation_null(zoo[names[i]], zoo[names[j]],
+                                               n_perm=60, seed=0, **kw)
+        for i in range(3) for j in range(i + 1, 3)
+    }
+
+    # Same footing: the aggregate null is centred where the mean of the per-pair
+    # nulls is, not where any single pair's null is.
+    assert zoo_null.mean() == pytest.approx(
+        float(np.mean([v.mean() for v in pair_nulls.values()])), abs=0.01
+    )
+    # ...and it is strictly tighter, because it averages three pairs.
+    assert zoo_null.std() < min(v.std() for v in pair_nulls.values())
+
+    # Consequence: the p-value for the aggregate score genuinely differs
+    # depending on which null it is read against.
+    from manylatents.metrics.platonic_convergence import PlatonicConvergence
+    observed = PlatonicConvergence(embeddings=zoo, **kw)["score"]
+    p_zoo = empirical_p(observed, zoo_null, higher_is_better=True)
+    p_pair = empirical_p(observed, pair_nulls[("a", "b")], higher_is_better=True)
+    assert p_zoo != pytest.approx(p_pair)
+
+
+def test_zoo_null_rejects_single_model():
+    from manylatents.metrics.nulls import zoo_permutation_null
+
+    rng = np.random.default_rng(15)
+    with pytest.raises(ValueError, match="at least 2 models"):
+        zoo_permutation_null({"a": rng.normal(size=(20, 3))}, measure="mutual_knn", n_perm=2)

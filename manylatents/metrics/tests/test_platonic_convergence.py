@@ -82,3 +82,21 @@ def test_mismatched_sample_counts_raise():
     }
     with pytest.raises(ValueError, match="Sample count mismatch"):
         alignment_matrix(acts, measure="mutual_knn", k=3)
+
+
+@pytest.mark.parametrize("measure", MEASURES)
+def test_all_measures_accept_singleton_middle_axis(measure):
+    """(N, 1, D) snapshots must work identically for every measure.
+
+    mutual_knn squeezes them via _ensure_2d; before the fix the diffop measures
+    passed the 3-D array straight to scipy and died with 'A 2-dimensional array
+    must be passed.'
+    """
+    zoo2d = _zoo(seed=1)
+    zoo3d = {name: arr[:, None, :] for name, arr in zoo2d.items()}
+    kw = dict(measure=measure, k=5, n_components=3, knn=5)
+
+    names_3d, mat_3d = alignment_matrix(zoo3d, **kw)
+    names_2d, mat_2d = alignment_matrix(zoo2d, **kw)
+    assert names_3d == names_2d
+    np.testing.assert_allclose(mat_3d, mat_2d, atol=1e-12)

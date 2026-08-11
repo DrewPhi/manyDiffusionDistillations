@@ -14,14 +14,26 @@ from manylatents.callbacks.diffusion_operator import DiffusionGauge
 from manylatents.metrics.registry import register_metric
 
 
+def _ensure_2d(arr: np.ndarray) -> np.ndarray:
+    """Squeeze a singleton middle axis, matching mutual_knn's convention.
+
+    Activation snapshots are sometimes stored as (N, 1, D). ``mutual_knn``
+    already squeezes them; without the same squeeze here the diffop measures
+    would reject inputs their sibling measure silently accepts.
+    """
+    if arr.ndim == 3 and arr.shape[1] == 1:
+        return arr.squeeze(1)
+    return arr
+
+
 def build_operator(acts: np.ndarray, knn: int = 35, alpha: float = 1.0) -> np.ndarray:
-    """Build a symmetric diffusion operator from (N, D) activations.
+    """Build a symmetric diffusion operator from (N, D) or (N, 1, D) activations.
 
     Symmetric so that ``np.linalg.eigh`` returns real eigenvectors; the default
     row-stochastic operator is non-symmetric and would need a complex solver.
     """
     gauge = DiffusionGauge(knn=knn, alpha=alpha, symmetric=True)
-    op = np.asarray(gauge(acts), dtype=float)
+    op = np.asarray(gauge(_ensure_2d(np.asarray(acts))), dtype=float)
     return 0.5 * (op + op.T)
 
 
