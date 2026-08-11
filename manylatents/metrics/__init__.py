@@ -62,6 +62,18 @@ from manylatents.metrics.cross_modal_jaccard import CrossModalJaccard, cross_mod
 from manylatents.metrics.rank_agreement import RankAgreement
 from manylatents.metrics.alignment_score import AlignmentScore, StratificationResult, stratify_by_percentile
 
+# Cross-model convergence metrics
+from manylatents.metrics.mutual_knn import MutualKNN, mutual_knn_pairwise
+from manylatents.metrics.diffop_alignment import (
+    DiffopAlignment,
+    build_operator,
+    top_eigvecs,
+    principal_angle_cosines,
+    diffop_frobenius_distance,
+    diffop_subspace_alignment,
+)
+from manylatents.metrics.platonic_convergence import PlatonicConvergence, alignment_matrix, MEASURES
+
 # Spectral metrics
 from manylatents.metrics.spectral_gap_ratio import SpectralGapRatio
 from manylatents.metrics.spectral_decay_rate import SpectralDecayRate
@@ -135,6 +147,18 @@ __all__ = [
     "AlignmentScore",
     "StratificationResult",
     "stratify_by_percentile",
+    # Cross-model convergence metrics
+    "MutualKNN",
+    "mutual_knn_pairwise",
+    "DiffopAlignment",
+    "build_operator",
+    "top_eigvecs",
+    "principal_angle_cosines",
+    "diffop_frobenius_distance",
+    "diffop_subspace_alignment",
+    "PlatonicConvergence",
+    "alignment_matrix",
+    "MEASURES",
     # Spectral metrics
     "SpectralGapRatio",
     "SpectralDecayRate",
