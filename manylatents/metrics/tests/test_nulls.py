@@ -87,3 +87,12 @@ def test_split_half_null_uses_disjoint_halves():
     for idx_a, idx_b in seen:
         assert len(set(idx_a) & set(idx_b)) == 0
         assert len(idx_a) + len(idx_b) <= 40
+
+
+def test_split_half_rejects_bandwidth_wider_than_half():
+    """A knn wider than the half-split silently over-smooths and biases the
+    CLT floor downward, so it must raise rather than clamp."""
+    rng = np.random.default_rng(9)
+    acts = rng.normal(size=(20, 3)).astype(np.float32)
+    with pytest.raises(ValueError, match="must be < half"):
+        split_half_spectral_null(acts, n_splits=2, n_components=2, knn=10, seed=0)

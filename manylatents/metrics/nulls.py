@@ -110,18 +110,29 @@ def split_half_spectral_null(
         acts: (N, D) activations from a single model.
         n_splits: Number of independent random half-splits.
         n_components: Number of leading eigenvalues compared.
-        knn: Adaptive-bandwidth neighbour count. Must be < N/2.
+        knn: Adaptive-bandwidth neighbour count. Must be < N/2 — enforced by
+            raising ``ValueError``, not silently clamped: a wider bandwidth
+            over-smooths each half and biases the CLT floor downward, which is
+            the one direction this control must never move in silently.
         seed: RNG seed.
         _return_index_pairs: Test hook — return the (idx_a, idx_b) pairs instead
             of the distances, so disjointness can be asserted.
 
     Returns:
         (n_splits,) array of spectral distances, or the index pairs.
+
+    Raises:
+        ValueError: If ``knn >= half`` (``half = N // 2``).
     """
     rng = np.random.default_rng(seed)
     x = np.asarray(acts)
     n = x.shape[0]
     half = n // 2
+    if knn >= half:
+        raise ValueError(
+            f"knn={knn} must be < half={half} (n={n}); a wider bandwidth "
+            "biases the CLT floor downward"
+        )
 
     pairs: List[Tuple[np.ndarray, np.ndarray]] = []
     dists = np.empty(n_splits, dtype=float)
@@ -131,8 +142,8 @@ def split_half_spectral_null(
         pairs.append((idx_a, idx_b))
         if _return_index_pairs:
             continue
-        op_a = build_operator(x[idx_a], knn=min(knn, half - 1))
-        op_b = build_operator(x[idx_b], knn=min(knn, half - 1))
+        op_a = build_operator(x[idx_a], knn=knn)
+        op_b = build_operator(x[idx_b], knn=knn)
         dists[i] = spectral_distance(op_a, op_b, n_components=n_components)
 
     if _return_index_pairs:
