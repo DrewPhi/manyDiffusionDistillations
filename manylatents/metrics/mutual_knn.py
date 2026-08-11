@@ -5,7 +5,7 @@ Hypothesis literature uses |A∩B|/k. The two rank model pairs differently,
 so reproducing the PRH baseline requires this second form.
 """
 
-from typing import Dict, Union
+from typing import Dict, Optional, Union
 
 import numpy as np
 
@@ -64,6 +64,7 @@ def MutualKNN(
     module=None,
     k: int = 10,
     return_pairwise: bool = False,
+    cache: Optional[dict] = None,
 ) -> Union[float, Dict[str, np.ndarray]]:
     """Mean mutual-kNN overlap across all model pairs.
 

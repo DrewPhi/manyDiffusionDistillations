@@ -6,7 +6,7 @@ but orthogonal eigenspaces score as perfectly aligned. The subspace alignment
 here compares the eigenspaces themselves via principal angles.
 """
 
-from typing import Any, Dict, Union
+from typing import Any, Dict, Optional, Union
 
 import numpy as np
 
@@ -78,6 +78,7 @@ def DiffopAlignment(
     measure: str = "diffop_angles",
     n_components: int = 10,
     knn: int = 35,
+    cache: Optional[dict] = None,
 ) -> Dict[str, Any]:
     """Mean pairwise diffusion-operator alignment across models.
 
