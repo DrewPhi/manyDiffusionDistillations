@@ -26,13 +26,28 @@ def _ensure_2d(arr: np.ndarray) -> np.ndarray:
     return arr
 
 
-def build_operator(acts: np.ndarray, knn: int = 35, alpha: float = 1.0) -> np.ndarray:
+def build_operator(
+    acts: np.ndarray,
+    knn: int = 35,
+    alpha: float = 1.0,
+    sigma_scale: Optional[float] = None,
+) -> np.ndarray:
     """Build a symmetric diffusion operator from (N, D) or (N, 1, D) activations.
 
     Symmetric so that ``np.linalg.eigh`` returns real eigenvectors; the default
     row-stochastic operator is non-symmetric and would need a complex solver.
+
+    Args:
+        acts: (N, D) or (N, 1, D) activations.
+        knn: Adaptive k-th-nearest-neighbour bandwidth.
+        alpha: Diffusion normalization exponent.
+        sigma_scale: When set, a fixed global bandwidth of ``sigma_scale x``
+            the median pairwise distance, which takes precedence over ``knn``.
+            The adaptive bandwidth over-smooths high-dimensional activation
+            clouds — see :func:`manylatents.callbacks.diffusion_operator.effective_neighbors`
+            — so callers measuring real representations should set this.
     """
-    gauge = DiffusionGauge(knn=knn, alpha=alpha, symmetric=True)
+    gauge = DiffusionGauge(knn=knn, alpha=alpha, symmetric=True, sigma_scale=sigma_scale)
     op = np.asarray(gauge(_ensure_2d(np.asarray(acts))), dtype=float)
     return 0.5 * (op + op.T)
 

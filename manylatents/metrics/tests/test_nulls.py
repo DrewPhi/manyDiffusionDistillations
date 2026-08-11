@@ -280,3 +280,55 @@ def test_observed_beats_operator_null_when_correspondence_is_real():
     null = zoo_permutation_null_from_operators(ops, measure="diffop_angles", n_perm=99,
                                                seed=0, n_components=4)
     assert empirical_p(observed, null, higher_is_better=True) < 0.05
+
+
+def test_split_half_null_accepts_a_fixed_bandwidth():
+    """The floor must be measurable at the same bandwidth as the scores.
+
+    Measured at the adaptive kNN bandwidth, both halves are near-uniform
+    operators whose spectra almost coincide, so the floor is biased toward zero
+    — the same over-smoothing that motivated the fixed bandwidth in the first
+    place. A floor built at a different bandwidth from the score it gates is
+    not a control.
+    """
+    rng = np.random.default_rng(21)
+    acts = rng.normal(size=(120, 6)).astype(np.float32)
+
+    adaptive = split_half_spectral_null(acts, n_splits=5, n_components=3, knn=5, seed=0)
+    localized = split_half_spectral_null(
+        acts, n_splits=5, n_components=3, knn=5, seed=0, sigma_scale=0.25
+    )
+    over_smoothed = split_half_spectral_null(
+        acts, n_splits=5, n_components=3, knn=5, seed=0, sigma_scale=5.0
+    )
+
+    assert localized.shape == (5,)
+    assert np.all(np.isfinite(localized))
+    assert not np.allclose(localized, adaptive)
+    # The bias the fixed bandwidth exists to avoid: at sigma_scale=5 the halves
+    # are near-uniform matrices whose spectra almost coincide, and the floor
+    # collapses by two orders of magnitude.
+    assert float(over_smoothed.mean()) < 0.1 * float(localized.mean())
+
+
+def test_split_half_null_default_is_unchanged_by_the_sigma_scale_argument():
+    rng = np.random.default_rng(22)
+    acts = rng.normal(size=(80, 4)).astype(np.float32)
+
+    implicit = split_half_spectral_null(acts, n_splits=4, n_components=3, knn=5, seed=0)
+    explicit = split_half_spectral_null(
+        acts, n_splits=4, n_components=3, knn=5, seed=0, sigma_scale=None
+    )
+
+    assert np.array_equal(implicit, explicit)
+
+
+def test_split_half_bandwidth_guard_still_applies_under_fixed_bandwidth():
+    """``knn`` is inert once ``sigma_scale`` is set, but the guard is cheap and
+    a caller passing an over-wide knn is signalling a misconfigured call."""
+    rng = np.random.default_rng(23)
+    acts = rng.normal(size=(20, 3)).astype(np.float32)
+
+    with pytest.raises(ValueError, match="must be < half"):
+        split_half_spectral_null(acts, n_splits=2, n_components=2, knn=10, seed=0,
+                                 sigma_scale=0.25)

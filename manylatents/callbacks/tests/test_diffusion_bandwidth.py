@@ -29,6 +29,7 @@ from manylatents.callbacks.diffusion_operator import (
     DiffusionGauge,
     build_diffusion_operator,
     effective_neighbors,
+    solve_sigma_scale,
 )
 from manylatents.utils.kernel_utils import symmetric_diffusion_operator
 
@@ -286,3 +287,134 @@ def test_effective_neighbors_all_zero_row_does_not_nan():
 def test_effective_neighbors_rejects_non_2d():
     with pytest.raises(ValueError):
         effective_neighbors(np.array([0.5, 0.5]))
+
+
+# ---------------------------------------------------------------------------
+# Bandwidth solver
+#
+# A single fixed ``sigma_scale`` does NOT smooth every representation equally:
+# on real activations, random-init cells sit at ~3x the effective-N of trained
+# cells at the same c. Comparing two arms at one global c therefore partly
+# measures how differently they were smoothed. These tests cover the solver
+# that equalizes the instrument instead — bisecting c per cell until the mean
+# effective-neighbour fraction hits a common target.
+# ---------------------------------------------------------------------------
+
+def _clustered(n_per: int = 40, d: int = 8, seed: int = 3) -> np.ndarray:
+    """Three well-separated Gaussian blobs — structure the operator can see."""
+    rng = np.random.default_rng(seed)
+    centers = np.array([[0.0] * d, [6.0] + [0.0] * (d - 1), [0.0, 6.0] + [0.0] * (d - 2)])
+    return np.vstack([c + rng.normal(scale=0.5, size=(n_per, d)) for c in centers])
+
+
+def _frac(acts: np.ndarray, c: float) -> float:
+    op = build_diffusion_operator(acts, method="diffusion", sigma_scale=c)
+    return float(effective_neighbors(op).mean() / acts.shape[0])
+
+
+def test_effective_n_fraction_is_monotone_in_sigma_scale():
+    """Bisection is only valid if the fraction rises with the bandwidth.
+
+    Asserted rather than assumed: the solver's correctness rests entirely on it.
+    """
+    acts = _clustered()
+    grid = np.linspace(0.05, 1.5, 25)
+
+    fracs = np.array([_frac(acts, c) for c in grid])
+
+    assert np.all(np.diff(fracs) > -1e-9), f"non-monotone: {fracs}"
+    assert fracs[0] < fracs[-1]
+
+
+def test_solve_hits_the_target_fraction_within_tol():
+    acts = _clustered()
+
+    scale, achieved = solve_sigma_scale(acts, target_frac=0.35, tol=0.01)
+
+    assert abs(achieved - 0.35) <= 0.01
+    assert 0.05 <= scale <= 1.5
+
+
+def test_solved_scale_reproduces_the_reported_fraction():
+    """The returned pair must describe the operator a caller then builds."""
+    acts = _clustered()
+
+    scale, achieved = solve_sigma_scale(acts, target_frac=0.4, tol=0.01)
+
+    assert _frac(acts, scale) == pytest.approx(achieved, abs=1e-12)
+
+
+def test_solve_is_deterministic():
+    acts = _clustered()
+
+    first = solve_sigma_scale(acts, target_frac=0.35, tol=0.01)
+    second = solve_sigma_scale(acts, target_frac=0.35, tol=0.01)
+
+    assert first == second
+
+
+def test_tighter_target_gives_smaller_sigma_scale():
+    acts = _clustered()
+
+    tight, _ = solve_sigma_scale(acts, target_frac=0.2, tol=0.005)
+    loose, _ = solve_sigma_scale(acts, target_frac=0.5, tol=0.005)
+
+    assert tight < loose
+
+
+def test_unreachable_target_raises_reporting_the_bracket():
+    """Above the bracket's reach: the error must say what WAS achievable."""
+    acts = _clustered()
+
+    with pytest.raises(ValueError) as exc:
+        solve_sigma_scale(acts, target_frac=0.999, lo=0.05, hi=0.2, tol=1e-4)
+
+    message = str(exc.value)
+    assert "0.05" in message and "0.2" in message
+    assert "0.999" in message
+
+
+def test_unreachable_target_below_the_bracket_raises():
+    acts = _clustered()
+
+    with pytest.raises(ValueError) as exc:
+        solve_sigma_scale(acts, target_frac=1e-4, lo=0.5, hi=1.5, tol=1e-6)
+
+    assert "1e-04" in str(exc.value) or "0.0001" in str(exc.value)
+
+
+def test_endpoint_inside_tolerance_is_returned_without_bisecting():
+    acts = _clustered()
+    lo = 0.05
+    frac_lo = _frac(acts, lo)
+
+    scale, achieved = solve_sigma_scale(acts, target_frac=frac_lo, lo=lo, hi=1.5, tol=0.01)
+
+    assert scale == lo
+    assert achieved == pytest.approx(frac_lo, abs=1e-12)
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"target_frac": 0.0},
+        {"target_frac": 1.5},
+        {"lo": 0.0},
+        {"lo": 1.0, "hi": 0.5},
+        {"tol": 0.0},
+        {"max_iter": 0},
+    ],
+)
+def test_solver_rejects_invalid_arguments(kwargs):
+    with pytest.raises(ValueError):
+        solve_sigma_scale(_clustered(n_per=10), **kwargs)
+
+
+def test_solver_accepts_3d_singleton_activations():
+    """(N, 1, D) snapshots are handled elsewhere in the stack; match that."""
+    acts = _clustered(n_per=20)
+
+    flat, _ = solve_sigma_scale(acts, target_frac=0.35, tol=0.01)
+    nested, _ = solve_sigma_scale(acts[:, None, :], target_frac=0.35, tol=0.01)
+
+    assert flat == nested

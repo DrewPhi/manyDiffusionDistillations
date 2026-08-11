@@ -206,6 +206,113 @@ def effective_neighbors(op: np.ndarray) -> np.ndarray:
     return out
 
 
+def solve_sigma_scale(
+    acts: Any,
+    target_frac: float = 0.35,
+    lo: float = 0.05,
+    hi: float = 1.5,
+    tol: float = 0.01,
+    max_iter: int = 25,
+    **gauge_kwargs: Any,
+) -> Tuple[float, float]:
+    """Bandwidth that puts one representation at a chosen effective-N fraction.
+
+    A single fixed ``sigma_scale`` does not smooth every representation equally.
+    Measured at the penultimate layer over a 2048-item probe, ``c = 0.25`` gives
+    19% effective neighbours on a trained BERT but 32% on the same model at
+    random init — so a trained-vs-init comparison run at one global ``c`` partly
+    measures how differently the two arms were smoothed. Solving each cell to a
+    common ``target_frac`` removes that confound: the instrument is equalized,
+    and what is left to differ is the geometry.
+
+    Bisects ``sigma_scale`` on ``mean(effective_neighbors(op)) / N``, which is
+    monotonically increasing in ``sigma_scale`` (larger bandwidth spreads every
+    row over more points; in the limit the operator is uniform and the fraction
+    is 1). ``test_effective_n_fraction_is_monotone_in_sigma_scale`` asserts that
+    on real structure rather than leaving it as an assumption.
+
+    Args:
+        acts: (N, D) — or (N, 1, D) — representations.
+        target_frac: Desired mean effective neighbours as a fraction of N, in
+            (0, 1]. ~0.35 is the regime a prior study found the operator usable
+            in; near 1 the operator is the uniform matrix and carries no geometry.
+        lo: Lower end of the search bracket. Must be > 0.
+        hi: Upper end of the search bracket. Must be > ``lo``.
+        tol: Absolute tolerance on the achieved fraction.
+        max_iter: Maximum bisection steps after the two bracket evaluations.
+        **gauge_kwargs: Forwarded to :func:`build_diffusion_operator` (``alpha``,
+            ``symmetric``, ``metric``). ``sigma_scale`` is the solved variable
+            and is rejected here.
+
+    Returns:
+        ``(sigma_scale, achieved_frac)`` — the fraction is the one measured at
+        the returned scale, so a caller that rebuilds at that scale gets exactly
+        the operator described.
+
+    Raises:
+        ValueError: On invalid arguments; when ``target_frac`` lies outside the
+            fractions reachable in ``[lo, hi]`` (the message reports the bracket
+            and both achieved endpoints); or when bisection has not reached
+            ``tol`` within ``max_iter`` steps.
+    """
+    if not 0.0 < target_frac <= 1.0:
+        raise ValueError(f"target_frac must be in (0, 1], got {target_frac}")
+    if lo <= 0.0:
+        raise ValueError(f"lo must be > 0, got {lo}")
+    if hi <= lo:
+        raise ValueError(f"hi must be > lo, got lo={lo}, hi={hi}")
+    if tol <= 0.0:
+        raise ValueError(f"tol must be > 0, got {tol}")
+    if max_iter < 1:
+        raise ValueError(f"max_iter must be >= 1, got {max_iter}")
+    if "sigma_scale" in gauge_kwargs:
+        raise ValueError("sigma_scale is what this function solves for; do not pass it")
+
+    x = np.asarray(acts)
+    if x.ndim == 3 and x.shape[1] == 1:
+        x = x.squeeze(1)
+    if x.ndim != 2:
+        raise ValueError(f"acts must be (N, D) or (N, 1, D), got shape {x.shape}")
+    n = x.shape[0]
+
+    def achieved(scale: float) -> float:
+        op = build_diffusion_operator(x, method="diffusion", sigma_scale=scale, **gauge_kwargs)
+        return float(effective_neighbors(op).mean() / n)
+
+    frac_lo = achieved(lo)
+    if abs(frac_lo - target_frac) <= tol:
+        return lo, frac_lo
+    frac_hi = achieved(hi)
+    if abs(frac_hi - target_frac) <= tol:
+        return hi, frac_hi
+
+    if not frac_lo < target_frac < frac_hi:
+        raise ValueError(
+            f"target_frac={target_frac} is unreachable in the bracket "
+            f"[{lo}, {hi}]: sigma_scale={lo} gives {frac_lo:.4f} and "
+            f"sigma_scale={hi} gives {frac_hi:.4f}. Widen the bracket."
+        )
+
+    a, b = lo, hi
+    frac_mid = frac_lo
+    mid = a
+    for _ in range(max_iter):
+        mid = 0.5 * (a + b)
+        frac_mid = achieved(mid)
+        if abs(frac_mid - target_frac) <= tol:
+            return mid, frac_mid
+        if frac_mid < target_frac:
+            a = mid
+        else:
+            b = mid
+
+    raise ValueError(
+        f"bisection did not reach target_frac={target_frac} within tol={tol} "
+        f"in max_iter={max_iter} steps; last sigma_scale={mid} gave "
+        f"{frac_mid:.4f}, bracket narrowed to [{a}, {b}]"
+    )
+
+
 # =============================================================================
 # Trajectory analysis (for analyzing operator outputs over time/models)
 # =============================================================================

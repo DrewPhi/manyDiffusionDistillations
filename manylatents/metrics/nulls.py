@@ -485,6 +485,7 @@ def split_half_spectral_null(
     n_components: int = 10,
     knn: int = 35,
     seed: int = 0,
+    sigma_scale: Optional[float] = None,
     _return_index_pairs: bool = False,
 ) -> Union[np.ndarray, List[Tuple[np.ndarray, np.ndarray]]]:
     """CLT floor: spectral distance between two disjoint halves of ONE model.
@@ -502,6 +503,12 @@ def split_half_spectral_null(
             over-smooths each half and biases the CLT floor downward, which is
             the one direction this control must never move in silently.
         seed: RNG seed.
+        sigma_scale: Fixed ``sigma_scale x median`` bandwidth for both halves,
+            taking precedence over ``knn`` (see
+            :func:`manylatents.metrics.diffop_alignment.build_operator`). Set it
+            to the bandwidth the score being gated was measured at: at the
+            adaptive bandwidth both halves are near-uniform operators whose
+            spectra almost coincide, which biases the floor toward zero.
         _return_index_pairs: Test hook — return the (idx_a, idx_b) pairs instead
             of the distances, so disjointness can be asserted.
 
@@ -529,8 +536,8 @@ def split_half_spectral_null(
         pairs.append((idx_a, idx_b))
         if _return_index_pairs:
             continue
-        op_a = build_operator(x[idx_a], knn=knn)
-        op_b = build_operator(x[idx_b], knn=knn)
+        op_a = build_operator(x[idx_a], knn=knn, sigma_scale=sigma_scale)
+        op_b = build_operator(x[idx_b], knn=knn, sigma_scale=sigma_scale)
         dists[i] = spectral_distance(op_a, op_b, n_components=n_components)
 
     if _return_index_pairs:

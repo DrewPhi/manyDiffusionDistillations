@@ -116,3 +116,48 @@ def test_build_operator_accepts_singleton_middle_axis():
     np.testing.assert_allclose(
         build_operator(acts[:, None, :], knn=5), build_operator(acts, knn=5), atol=1e-12
     )
+
+
+# ---------------------------------------------------------------------------
+# Fixed-bandwidth pass-through
+#
+# The adaptive kNN bandwidth over-smooths high-dimensional activation clouds
+# (84-91% effective neighbours on a 2048-item probe), so the operators these
+# measures consume have to be buildable at a fixed c x median bandwidth too.
+# ---------------------------------------------------------------------------
+
+def test_build_operator_default_is_unchanged_by_the_sigma_scale_argument():
+    """Bit-exact: every cached artifact was built through the default path."""
+    rng = np.random.default_rng(11)
+    acts = rng.normal(size=(40, 5))
+
+    implicit = build_operator(acts, knn=5)
+    explicit = build_operator(acts, knn=5, sigma_scale=None)
+
+    assert np.array_equal(implicit, explicit)
+
+
+def test_build_operator_sigma_scale_matches_the_gauge():
+    from manylatents.callbacks.diffusion_operator import DiffusionGauge
+
+    rng = np.random.default_rng(12)
+    acts = rng.normal(size=(40, 5))
+
+    op = build_operator(acts, knn=5, sigma_scale=0.25)
+    gauge = DiffusionGauge(knn=5, alpha=1.0, symmetric=True, sigma_scale=0.25)
+    expected = np.asarray(gauge(acts), dtype=float)
+
+    assert np.array_equal(op, 0.5 * (expected + expected.T))
+
+
+def test_build_operator_sigma_scale_localizes_relative_to_knn():
+    """A small fixed bandwidth must give strictly fewer effective neighbours."""
+    from manylatents.callbacks.diffusion_operator import effective_neighbors
+
+    rng = np.random.default_rng(13)
+    acts = rng.normal(size=(60, 8))
+
+    adaptive = effective_neighbors(build_operator(acts, knn=35)).mean()
+    fixed = effective_neighbors(build_operator(acts, knn=35, sigma_scale=0.25)).mean()
+
+    assert fixed < adaptive
