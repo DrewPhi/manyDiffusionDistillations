@@ -10,6 +10,13 @@ Usage:
     from manylatents.callbacks.diffusion_operator import build_diffusion_operator
     diff_op = build_diffusion_operator(embeddings, method="diffusion")
 
+    # Fixed small bandwidth (c x median) instead of the adaptive kNN one
+    diff_op = build_diffusion_operator(embeddings, sigma_scale=0.25)
+
+    # Check the bandwidth actually localized the operator
+    from manylatents.callbacks.diffusion_operator import effective_neighbors
+    effective_neighbors(diff_op).mean()  # << N means real geometry
+
     # As Lightning callback (see lightning/callbacks/activation_tracker.py)
 """
 import functools
@@ -40,7 +47,11 @@ def build_diffusion_operator(
     Args:
         source: Input representations (N samples x D features)
         method: Construction method ("diffusion", future: "sae", "attention")
-        **kwargs: Method-specific parameters
+        **kwargs: Method-specific parameters. For method="diffusion" these are
+            the :class:`DiffusionGauge` fields: ``knn`` (default 35, adaptive
+            k-th-NN bandwidth), ``sigma_scale`` (default None; when set, a fixed
+            global bandwidth of ``sigma_scale * median(distances)`` that takes
+            precedence over ``knn``), ``alpha``, ``symmetric``, ``metric``.
 
     Returns:
         Diffusion operator (N, N)
@@ -85,8 +96,22 @@ class DiffusionGauge:
         representations (N, D) -> pairwise distances -> Gaussian kernel ->
         affinity matrix -> diffusion operator
 
+    Bandwidth (three mutually exclusive modes, checked in this order):
+        1. ``sigma_scale`` set -> fixed global bandwidth
+           ``sigma = sigma_scale * median(nonzero pairwise distances)``,
+           kernel ``exp(-d^2 / (2 sigma^2))``. Takes precedence over ``knn``.
+        2. ``knn`` set -> adaptive k-th-nearest-neighbour bandwidth.
+        3. neither -> global median bandwidth (``sigma_scale = 1`` in effect).
+
+    Mode 1 is the ``c x median`` parametrization: small ``c`` (c <~ 0.25) keeps
+    the operator localized. Both the median bandwidth and the adaptive kNN
+    bandwidth over-smooth on high-dimensional activation clouds — measure with
+    :func:`effective_neighbors` rather than assuming.
+
     Attributes:
         knn: Number of neighbors for adaptive bandwidth. If None, uses global bandwidth.
+        sigma_scale: If set, use a fixed global bandwidth of this multiple of the
+            median nonzero pairwise distance. Overrides ``knn``. Must be > 0.
         alpha: Diffusion normalization parameter (0=graph Laplacian, 1=Laplace-Beltrami)
         symmetric: If True, return symmetric operator D^{-1/2} K D^{-1/2}
         metric: Distance metric for pairwise computation
@@ -95,6 +120,14 @@ class DiffusionGauge:
     alpha: float = 1.0
     symmetric: bool = False
     metric: str = "euclidean"
+    sigma_scale: Optional[float] = None
+
+    def __post_init__(self) -> None:
+        if self.sigma_scale is not None and self.sigma_scale <= 0:
+            raise ValueError(
+                f"sigma_scale must be > 0 (got {self.sigma_scale}); it multiplies "
+                f"the median pairwise distance to give the fixed bandwidth."
+            )
 
     def __call__(self, representations: Any) -> np.ndarray:
         """Compute diffusion operator.
@@ -110,7 +143,10 @@ class DiffusionGauge:
 
         distances = squareform(pdist(representations, metric=self.metric))
 
-        if self.knn is not None:
+        if self.sigma_scale is not None:
+            sigma = self.sigma_scale * np.median(distances[distances > 0])
+            kernel = np.exp(-distances**2 / (2 * sigma**2))
+        elif self.knn is not None:
             sorted_dists = np.sort(distances, axis=1)
             sigma = sorted_dists[:, min(self.knn, distances.shape[0] - 1)]
             sigma = np.maximum(sigma, 1e-10)
@@ -127,6 +163,47 @@ class DiffusionGauge:
             row_sums = kernel.sum(axis=1, keepdims=True)
             row_sums = np.maximum(row_sums, 1e-10)
             return kernel / row_sums
+
+
+# =============================================================================
+# Bandwidth diagnostics
+# =============================================================================
+
+def effective_neighbors(op: np.ndarray) -> np.ndarray:
+    """Per-row effective number of neighbours (participation ratio).
+
+    For a row-stochastic operator ``P``, row ``i`` has effective neighbour count
+
+        n_eff(i) = 1 / sum_j p_ij**2
+
+    A row spread uniformly over ``N`` entries gives exactly ``N``; a one-hot row
+    gives exactly 1. This is the measurement to use when picking a bandwidth:
+    an operator whose mean ``n_eff`` approaches ``N`` is the uniform matrix in
+    disguise and carries no geometry.
+
+    Rows are **normalized to sum to 1 before the ratio is taken**, so operators
+    that were saved unnormalized (or with a symmetric normalization, which is
+    not row-stochastic) still give a meaningful, scale-invariant answer. Rows
+    that sum to 0 are reported as 0 effective neighbours rather than NaN.
+
+    Args:
+        op: Operator of shape (N, N) — or any (rows, cols) matrix of weights.
+
+    Returns:
+        Array of shape (N,) with the effective neighbour count of each row.
+    """
+    op = np.asarray(op, dtype=np.float64)
+    if op.ndim != 2:
+        raise ValueError(f"effective_neighbors expects a 2-D matrix, got shape {op.shape}")
+
+    row_sums = op.sum(axis=1, keepdims=True)
+    safe = np.where(np.abs(row_sums) > 0, row_sums, 1.0)
+    p = op / safe
+
+    sq = (p**2).sum(axis=1)
+    out = np.zeros_like(sq)
+    np.divide(1.0, sq, out=out, where=sq > 0)
+    return out
 
 
 # =============================================================================
