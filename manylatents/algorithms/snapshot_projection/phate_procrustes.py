@@ -78,6 +78,7 @@ def project_to_student_dim(
     n_pca: Optional[int] = None,
     n_landmark: Optional[int] = None,
     n_jobs: int = -1,
+    mds_solver: str = "sgd",
     procrustes_align_to_teacher: bool = True,
     random_state: Optional[int] = None,
 ) -> ActivationSnapshot:
@@ -86,6 +87,13 @@ def project_to_student_dim(
 
     Preserves ``input_ids``, ``attention_mask``, ``sample_ids``, and
     ``reduction``. Per-layer dtype and device are restored on the way out.
+
+    ``mds_solver`` selects how PHATE embeds its potential distances. The default
+    ``"sgd"`` is PHATE's own and is what every target built so far used, so
+    leaving it alone reproduces those targets exactly; it stops at a hard-coded
+    iteration count and on a 2048-item probe leaves stress still falling.
+    ``"smacof"`` iterates to a tolerance instead. Changing it changes the
+    target, so a student trained against one is not aligned to the other.
     """
     from manylatents.algorithms.latent.phate import PHATEModule
 
@@ -104,6 +112,7 @@ def project_to_student_dim(
             n_pca=n_pca,
             n_landmark=n_landmark,
             n_jobs=int(n_jobs),
+            mds_solver=str(mds_solver),
         )
         z_phate = phate.fit_transform(teacher_acts)
         if not isinstance(z_phate, Tensor):

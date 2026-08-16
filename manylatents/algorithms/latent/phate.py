@@ -21,6 +21,8 @@ class PHATEModule(LatentModule):
         n_pca: Optional[int] = 100,
         n_landmark: Optional[int] = 2000,
         n_jobs: Optional[int] = -1,
+        mds: str = "metric",
+        mds_solver: str = "sgd",
         verbose=False,
         fit_fraction: float = 1.0,
         random_landmarking: bool = False,
@@ -41,6 +43,15 @@ class PHATEModule(LatentModule):
         self.n_pca = n_pca
         self.n_landmark = n_landmark
         self.n_jobs = n_jobs
+        # PHATE's final step embeds the potential distances by MDS. Its default
+        # solver, 'sgd', auto-tunes n_iter from the sample count (500 for
+        # 1000 <= n < 5000) and exposes no override, so on a 2048-item probe it
+        # stops while stress is still falling ~1% per 50 iterations and warns
+        # "SGD-MDS may not have converged". 'smacof' is the supported
+        # alternative and iterates to its own tolerance. Defaults are PHATE's
+        # own, so every existing caller keeps the embedding it already had.
+        self.mds = mds
+        self.mds_solver = mds_solver
         self.verbose = verbose
         self.fit_fraction = fit_fraction
         self.random_state = random_state
@@ -52,6 +63,16 @@ class PHATEModule(LatentModule):
     def _create_model(self):
         if self._resolved_backend == "torchdr":
             from torchdr import PHATE
+
+            # TorchDR has no separate MDS stage to configure, so a non-default
+            # request here cannot be honoured. Raise rather than accept it and
+            # silently return an embedding built the other way.
+            if (self.mds, self.mds_solver) != ("metric", "sgd"):
+                raise ValueError(
+                    f"backend='torchdr' cannot honour mds={self.mds!r} / "
+                    f"mds_solver={self.mds_solver!r}; those apply to the phate "
+                    "backend only"
+                )
 
             # TorchDR PHATE param mapping: knn->k, decay->alpha
             # TorchDR PHATE does NOT support faiss/keops, force backend=None
@@ -78,6 +99,8 @@ class PHATEModule(LatentModule):
                 'n_pca': self.n_pca,
                 'n_landmark': self.n_landmark,
                 'n_jobs': self.n_jobs,
+                'mds': self.mds,
+                'mds_solver': self.mds_solver,
                 'verbose': self.verbose,
                 'random_landmarking': self.random_landmarking,
             }
